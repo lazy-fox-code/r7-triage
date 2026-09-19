@@ -1,0 +1,39 @@
+{
+  "manifest_version": 2,
+  "name": "R7 Triage",
+  "description": "Граф переписки, поручения и разбор информирования",
+  "version": "0.1.0",
+  "default_locale": "ru",
+  "applications": {
+    "gecko": {
+      "id": "r7-triage@r7-office.ru",
+      "strict_min_version": "115.0",
+      "strict_max_version": "128.*"
+    }
+  },
+  "permissions": [
+    "accountsRead",
+    "messagesRead",
+    "messagesUpdate",
+    "messagesMove",
+    "messagesTags",
+    "addressBooks",
+    "compose",
+    "menus",
+    "storage",
+    "unlimitedStorage",
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "scripts": ["src/background.js"],
+    "persistent": true
+  },
+  "options_ui": {
+    "page": "src/ui/settings.html",
+    "browser_style": false
+  },
+  "browser_action": {
+    "default_title": "R7 Triage",
+    "default_popup": "src/ui/panel.html"
+  }
+}

@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>R7 Triage</title>
+  <style>
+    body { font: 13px/1.5 system-ui, sans-serif; margin: 0; padding: 12px;
+           width: 360px; }
+    button { width: 100%; padding: 8px; margin-bottom: 6px; }
+    #status { color: #666; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <button id="scan">Разобрать ящик</button>
+  <button id="export">Выгрузить состояние в JSON</button>
+  <div id="status"></div>
+  <script type="module" src="panel.js"></script>
+</body>
+</html>
