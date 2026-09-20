@@ -24,7 +24,7 @@
 //    умеет ломать приватные поля классов и порядок вычислений; сломанный
 //    релиз, уехавший по политике на рабочие места, дороже любой защиты кода.
 
-import { cpSync, mkdirSync, rmSync, readdirSync, statSync, readFileSync, existsSync } from "node:fs";
+import { cpSync, mkdirSync, rmSync, readdirSync, statSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, extname, resolve } from "node:path";
 
@@ -38,6 +38,20 @@ mkdirSync(STAGE, { recursive: true });
 
 for (const item of ["manifest.json", "src", "_locales"]) {
   cpSync(item, join(STAGE, item), { recursive: true });
+}
+
+// Дата сборки для отсчёта демоверсии. В релизе впекается и якорит 90 дней —
+// переустановка профиля срок не сбрасывает (см. src/trial.js). В отладке 0:
+// срок считается от установки, как и раньше. Дату задаёт CI через
+// R7_BUILD_DATE=ГГГГ-ММ-ДД (тот же день, что и пароль архива в релизе);
+// без переменной берётся текущий день сборки.
+const buildDateMs = release ? resolveBuildDate() : 0;
+writeFileSync(
+  join(STAGE, "src", "build-info.js"),
+  "// Сгенерировано scripts/build.mjs при упаковке. Вручную не править.\n" +
+  `export const BUILD_DATE_MS = ${buildDateMs};\n`);
+if (release) {
+  console.log(`дата сборки: ${new Date(buildDateMs).toISOString().slice(0, 10)}`);
 }
 
 if (release) {
@@ -54,6 +68,18 @@ rmSync(STAGE, { recursive: true, force: true });
 console.log(`${xpi}${release ? " (обфусцирован)" : ""}`);
 
 // -------------------------------------------------------------------------
+
+// Дата релиза в миллисекундах (полночь UTC). Берётся из R7_BUILD_DATE
+// (ГГГГ-ММ-ДД), заданной сборкой CI; локально — текущий день.
+function resolveBuildDate() {
+  const iso = process.env.R7_BUILD_DATE;
+  const ms = iso ? Date.parse(`${iso}T00:00:00Z`) : Date.now();
+  if (Number.isNaN(ms)) {
+    console.error(`Неверный R7_BUILD_DATE: ${iso} (нужно ГГГГ-ММ-ДД).`);
+    process.exit(1);
+  }
+  return ms;
+}
 
 function obfuscate(dir) {
   const bin = ["node_modules/.bin/javascript-obfuscator"]

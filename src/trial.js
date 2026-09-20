@@ -18,6 +18,15 @@
 // Здесь реализован честный вариант: защита от забывчивости, а не от взлома.
 // От перевода часов назад стоит водяной знак — наибольшее виденное время;
 // назад оно не идёт.
+//
+// Якорь срока. В отладке 90 дней считаются от установки (installedAt). В
+// релизе scripts/build.mjs впекает дату сборки в src/build-info.js, и якорем
+// становится она: переустановка профиля срок больше не сбрасывает — свежая
+// установка той же сборки берёт ту же дату релиза. Часы назад по-прежнему
+// сдерживает водяной знак. Неснимаемой это проверку не делает (см. выше):
+// каждая сборка живёт свои 90 дней, дальше нужна новая по каналу обновлений.
+
+import { BUILD_DATE_MS } from "./build-info.js";
 
 const KEY = "trial";
 const DAY = 86400000;
@@ -54,7 +63,9 @@ async function read() {
  */
 export async function state() {
   const { installedAt, watermark } = await read();
-  const endsAt = installedAt + TRIAL_DAYS * DAY;
+  // В релизе якорь — впечённая дата сборки; в отладке — установка.
+  const anchor = BUILD_DATE_MS || installedAt;
+  const endsAt = anchor + TRIAL_DAYS * DAY;
   const msLeft = Math.max(0, endsAt - watermark);
 
   return {
@@ -62,9 +73,9 @@ export async function state() {
     endsAt,
     msLeft,
     daysLeft: Math.ceil(msLeft / DAY),
-    daysUsed: Math.floor((watermark - installedAt) / DAY),
+    daysUsed: Math.floor((watermark - anchor) / DAY),
     expired: msLeft <= 0,
-    countdown: (watermark - installedAt) / DAY >= COUNTDOWN_FROM_DAY,
+    countdown: (watermark - anchor) / DAY >= COUNTDOWN_FROM_DAY,
   };
 }
 

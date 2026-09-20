@@ -41,6 +41,9 @@ globalThis.browser = {
 const { Scanner } = await import(`${SRC}scan.js`);
 const db = await import(`${SRC}db.js`);
 const trial = await import(`${SRC}trial.js`);
+// В релизной сборке дата впечена (см. scripts/build.mjs), и якорь срока — она,
+// а не установка. Тесты срока подстраиваются под текущий якорь.
+const { BUILD_DATE_MS } = await import(`${SRC}build-info.js`);
 
 // --- крошечный раннер ----------------------------------------------------
 
@@ -63,12 +66,19 @@ async function fresh() {
 }
 
 const DAYS = 86400000;
-/** Подменяет отметки срока так, будто прошло указанное число дней. */
+/**
+ * Подменяет отметки срока так, будто от якоря прошло указанное число дней.
+ * Якорь — впечённая дата сборки (релиз) либо установка (отладка); водяной
+ * знак ставим на `daysUsed + watermarkAhead` дней вперёд от якоря, чтобы
+ * проверка работала одинаково в обоих режимах.
+ */
 function agedTrial(daysUsed, { watermarkAhead = 0 } = {}) {
   const now = Date.now();
+  const installedAt = BUILD_DATE_MS || now - daysUsed * DAYS;
+  const anchor = BUILD_DATE_MS || installedAt;
   storage.set("trial", {
-    installedAt: now - daysUsed * DAYS,
-    watermark: now + watermarkAhead * DAYS,
+    installedAt,
+    watermark: anchor + (daysUsed + watermarkAhead) * DAYS,
   });
 }
 
@@ -343,6 +353,22 @@ test("перевод часов назад не продлевает срок", 
   equal(t.daysUsed, 61, "учитывается наибольшее виденное время, а не текущее");
   assert(t.countdown, "секундомер уже включён");
   assert(t.daysLeft < 30, "остаток считается от водяного знака");
+});
+
+test("переустановка профиля не сбрасывает срок релизной сборки", async () => {
+  // Пустое storage — как на свежей установке той же сборки.
+  await fresh();
+  const t = await trial.state();
+  if (BUILD_DATE_MS) {
+    // Релиз: якорь — впечённая дата сборки, «now» на него не влияет.
+    equal(t.endsAt, BUILD_DATE_MS + trial.TRIAL_DAYS * DAYS,
+      "срок отсчитан от даты сборки, а не от новой установки");
+  } else {
+    // Отладка: якорь — установка, срок начинается заново.
+    assert(Math.abs(t.endsAt - (Date.now() + trial.TRIAL_DAYS * DAYS)) < 5000,
+      "в отладке срок считается от установки");
+  }
+  assert(!t.expired, "свежая установка не истекла");
 });
 
 test("остаток срока выводится в читаемом виде", async () => {

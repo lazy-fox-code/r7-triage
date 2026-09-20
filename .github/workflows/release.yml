@@ -2,7 +2,9 @@
 #
 #   push в main / PR   — прогон тестов;
 #   тег вида v0.2.0    — релизная сборка (обфускация + тесты на обфусцированном
-#                        коде) и выкладка XPI в GitHub Releases.
+#                        коде), дата релиза впекается как якорь срока, и XPI
+#                        выкладывается в GitHub Releases внутри zip под
+#                        паролем-датой (ДДММГГГГ).
 #
 # Тег обязан совпадать с версией в manifest.json: иначе имя артефакта
 # (r7-triage-<версия>.xpi) разойдётся с тегом, и релиз будет вводить в
@@ -56,19 +58,42 @@ jobs:
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
+      # Дата релиза (UTC). Один момент времени на всё: она и впекается в
+      # сборку как якорь 90 дней (R7_BUILD_DATE=ГГГГ-ММ-ДД), и служит паролем
+      # архива в формате ДДММГГГГ. Так пароль и срок ссылаются на один день.
+      # Оговорка: день берётся по UTC — релиз у полуночи по местному времени
+      # может попасть на соседнюю дату.
+      - name: Дата релиза
+        run: |
+          NOW="$(date -u +%s)"
+          echo "RELEASE_DATE=$(date -u -d "@$NOW" +%Y-%m-%d)" >> "$GITHUB_ENV"
+          echo "ZIP_PW=$(date -u -d "@$NOW" +%d%m%Y)" >> "$GITHUB_ENV"
+
       # build:release сам обфусцирует и прогоняет тесты на обфусцированном
       # коде; если что-то сломалось — XPI не соберётся и шаг упадёт.
       - name: Собрать релизный XPI
-        run: npm run build:release
+        run: R7_BUILD_DATE="$RELEASE_DATE" npm run build:release
 
       - name: Проверить, что артефакт на месте
         run: test -f "dist/r7-triage-${VERSION}.xpi"
+
+      # Ассет релиза — plugin.xpi в zip под паролем-датой. Пароль не секрет
+      # (дата видна в релизе): это лёгкий барьер и защита от авто-распаковки
+      # и индексирования, а не шифрование. Оттого ZipCrypto (zip -P) —
+      # слабый, но самый совместимый: открывается штатными распаковщиками по
+      # паролю. Автоматические архивы «Source code» GitHub всё равно приложит —
+      # их через gh не убрать.
+      - name: Упаковать XPI в zip под паролем
+        run: |
+          cp "dist/r7-triage-${VERSION}.xpi" plugin.xpi
+          zip -P "$ZIP_PW" "dist/r7-triage-${VERSION}.zip" plugin.xpi
+          rm plugin.xpi
 
       - name: Выложить в Releases
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            "dist/r7-triage-${VERSION}.xpi" \
+            "dist/r7-triage-${VERSION}.zip" \
             --title "R7 Triage $GITHUB_REF_NAME" \
             --generate-notes
