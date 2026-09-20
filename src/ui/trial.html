@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>R7 Triage — демоверсия</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font: 14px/1.6 system-ui, sans-serif; margin: 0;
+           padding: 28px 32px; text-align: center; }
+    h1 { font-size: 17px; font-weight: 600; margin: 0 0 4px; }
+    #left { font: 600 34px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-variant-numeric: tabular-nums; margin: 18px 0 4px; }
+    #left.over { color: #C4314B; }
+    .muted { color: #888; font-size: 13px; }
+    button { padding: 8px 22px; margin-top: 22px; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <h1>Демонстрационная версия</h1>
+  <div class="muted" id="sub">До окончания срока работы</div>
+
+  <div id="left">—</div>
+  <div class="muted" id="ends"></div>
+
+  <p class="muted" id="note"></p>
+
+  <button id="ok">Продолжить</button>
+
+  <script type="module" src="trial.js"></script>
+</body>
+</html>

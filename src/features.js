@@ -1,5 +1,20 @@
-// Дешёвые признаки из заголовков. Считаются без обращения к телу письма
-// и без вызова модели. Задача — снять 60-80 % писем до инференса.
+// Дешёвые признаки. Задача — снять 60-80 % писем до инференса (T2).
+//
+// Признаки разделены по цене получения, и это разделение принципиально:
+//
+//   derive(row, me)  — из того, что уже лежит в IndexedDB после прохода T1.
+//                      Бесплатно, ничего не читает.
+//   enrich(full)     — из полных заголовков. Требует `messages.getFull`,
+//                      а он читает письмо целиком и, если тела нет в
+//                      офлайн-хранилище, тянет его с сервера.
+//
+// Поэтому List-Unsubscribe, Precedence и цепочка References не заполняются
+// проходом по ящику: MessageHeader их не отдаёт, а платить за них полным
+// чтением каждого из десятков тысяч писем нельзя.
+
+import { normalizeAddress } from "./keys.js";
+
+export { normalizeAddress as normalize };
 
 const BULK_HEADERS = [
   "list-unsubscribe",
@@ -10,45 +25,79 @@ const BULK_HEADERS = [
 ];
 
 /**
- * @param {object} hdr   результат browser.messages.get / query
- * @param {object} full  результат browser.messages.getFull
- * @param {string} meId  нормализованный адрес пользователя
+ * Признаки из записи, сделанной проходом T1. Набор своих адресов передаётся
+ * снаружи и не сохраняется в записи: алиасы, делегированные ящики и списки
+ * рассылки уточняются со временем, и уточнение не должно требовать
+ * повторного прохода по ящику.
+ *
+ * @param {object} row запись из хранилища `messages`
+ * @param {Set<string>} me нормализованные адреса пользователя
  */
-export function extract(hdr, full, meId) {
-  const headers = full?.headers ?? {};
-  const has = (name) => Boolean(headers[name]?.length);
-
-  const to = (hdr.recipients ?? []).map(normalize);
-  const cc = (hdr.ccList ?? []).map(normalize);
-
-  const inTo = to.includes(meId);
-  const inCc = cc.includes(meId);
+export function derive(row, me) {
+  const inTo = (row.to ?? []).some((a) => me.has(a));
+  const inCc = (row.cc ?? []).some((a) => me.has(a));
+  const to = row.to ?? [];
 
   return {
-    fromId: normalize(hdr.author),
-    date: hdr.date instanceof Date ? hdr.date.getTime() : Date.parse(hdr.date),
-    sizeBytes: hdr.size ?? 0,
-    subject: hdr.subject ?? "",
-
-    // Автоматика. Самый дешёвый и самый надёжный отсев.
-    isBulk: BULK_HEADERS.some(has),
-    isAutoReply: /^(auto|automatic)/i.test(headers["auto-submitted"]?.[0] ?? ""),
+    fromId: row.fromId,
+    date: row.date,
+    sizeBytes: row.sizeBytes,
+    subject: row.subject,
 
     // Адресация. To против CC — сильнейший дешёвый признак поручения.
     inTo,
     inCc,
-    recipientCount: to.length + cc.length,
+    recipientCount: row.recipientCount ?? to.length + (row.cc?.length ?? 0),
     isNamedRecipient: inTo && to.length <= 3,
 
-    // Тред.
-    threadId: headers["references"]?.[0]?.split(/\s+/)[0]
-      ?? headers["in-reply-to"]?.[0]
-      ?? headers["message-id"]?.[0]
-      ?? String(hdr.id),
-    isThreadStart: !has("in-reply-to"),
-
-    hasAttachments: Boolean(hdr.attachments?.length),
+    fromMe: me.has(row.fromId),
+    flagged: row.flagged,
   };
+}
+
+/**
+ * Признаки из полных заголовков. Вызывается только после `messages.getFull`.
+ *
+ * @param {object} full MessagePart
+ */
+export function enrich(full) {
+  const headers = full?.headers ?? {};
+  const has = (name) => Boolean(headers[name]?.length);
+  const first = (name) => headers[name]?.[0] ?? "";
+
+  return {
+    // Автоматика. Самый дешёвый и самый надёжный отсев.
+    isBulk: BULK_HEADERS.some(has),
+    isAutoReply: /^(auto|automatic)/i.test(first("auto-submitted")),
+
+    // Тред. References упорядочен от корня к последнему ответу, поэтому
+    // корень ветки — первый идентификатор в списке.
+    threadId: threadRoot(headers),
+    isThreadStart: !has("in-reply-to") && !has("references"),
+
+    // Вложения. В MessageHeader их нет вовсе — раньше здесь читалось
+    // несуществующее поле `hdr.attachments`, и признак всегда был ложным.
+    // Это исключение из-под правила об устаревшем информировании (T6),
+    // так что ошибка тут дороже обычной.
+    hasAttachments: hasAttachments(full),
+  };
+}
+
+function threadRoot(headers) {
+  const refs = (headers.references?.[0] ?? "").trim();
+  const raw = refs ? refs.split(/\s+/)[0]
+    : headers["in-reply-to"]?.[0] ?? headers["message-id"]?.[0] ?? "";
+  const m = /<([^>]*)>/.exec(raw ?? "");
+  const id = (m ? m[1] : raw ?? "").trim().toLowerCase();
+  return id ? `m:${id}` : null;
+}
+
+function hasAttachments(part) {
+  if (!part) return false;
+  const disposition = String(part.contentDisposition ?? "");
+  if (disposition.startsWith("attachment")) return true;
+  if (part.name && !String(part.contentType ?? "").startsWith("text/")) return true;
+  return (part.parts ?? []).some(hasAttachments);
 }
 
 /**
@@ -63,10 +112,4 @@ export function gate(f) {
     return { label: "info", confidence: 0.8, reason: "копия массовой рассылки" };
   }
   return null;
-}
-
-export function normalize(addr) {
-  if (!addr) return "";
-  const m = /<([^>]+)>/.exec(addr);
-  return (m ? m[1] : addr).trim().toLowerCase();
 }

@@ -1,13 +1,16 @@
 {
   "name": "r7-triage",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
+    "test": "node test/run.mjs",
     "build": "node scripts/build.mjs",
-    "lint": "eslint src scripts"
+    "build:release": "node scripts/build.mjs --release",
+    "lint": "eslint src scripts test"
   },
   "devDependencies": {
-    "eslint": "^9.0.0"
+    "eslint": "^9.0.0",
+    "javascript-obfuscator": "^5.7.0"
   }
 }

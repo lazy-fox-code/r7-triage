@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>R7 Triage — состояние</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font: 14px/1.6 system-ui, sans-serif; margin: 0 auto; padding: 24px;
+           max-width: 760px; }
+    h1 { font-size: 18px; }
+    h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em;
+         color: #888; margin-top: 28px; }
+    table { border-collapse: collapse; width: 100%; }
+    td, th { text-align: left; padding: 3px 12px 3px 0; }
+    td.v { text-align: right; font-variant-numeric: tabular-nums; }
+    button { padding: 8px 14px; margin-right: 8px; }
+    pre { background: #8881; padding: 10px; overflow-x: auto; font-size: 12px; }
+    .muted { color: #888; }
+    .danger { color: #C4314B; }
+  </style>
+</head>
+<body>
+  <h1>Состояние разбора</h1>
+  <p class="muted">
+    IndexedDB нельзя открыть и посмотреть снаружи, в отличие от файла SQLite.
+    Эта страница — единственный способ увидеть, что лежит в базе, целиком.
+  </p>
+
+  <h2>Записей в хранилищах</h2>
+  <table id="counts"><tbody></tbody></table>
+
+  <h2>Проходы</h2>
+  <div id="scans" class="muted">—</div>
+
+  <h2>Выгрузка</h2>
+  <p>
+    <button id="build">Собрать JSON</button>
+    <a id="link" hidden download="r7-triage-export.json">Скачать файл</a>
+  </p>
+  <div id="status" class="muted"></div>
+
+  <h2>Сброс</h2>
+  <p class="muted">
+    Удаляет всё разобранное вместе с чекпойнтами. Настройки не трогает.
+    Следующий проход начнётся с нуля.
+  </p>
+  <p><button id="reset" class="danger">Удалить базу</button></p>
+
+  <script type="module" src="state.js"></script>
+</body>
+</html>

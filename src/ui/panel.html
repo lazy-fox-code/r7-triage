@@ -4,16 +4,56 @@
   <meta charset="utf-8">
   <title>R7 Triage</title>
   <style>
+    :root { color-scheme: light dark; }
     body { font: 13px/1.5 system-ui, sans-serif; margin: 0; padding: 12px;
-           width: 360px; }
+           width: 340px; }
     button { width: 100%; padding: 8px; margin-bottom: 6px; }
-    #status { color: #666; white-space: pre-wrap; }
+    h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em;
+         color: #888; margin: 14px 0 6px; }
+    table { width: 100%; border-collapse: collapse; }
+    td { padding: 1px 0; vertical-align: top; }
+    td.k { color: #888; white-space: nowrap; padding-right: 8px; }
+    td.v { text-align: right; font-variant-numeric: tabular-nums; }
+    #bar { height: 4px; background: #0001; border-radius: 2px; overflow: hidden;
+           margin: 8px 0; }
+    #bar > i { display: block; height: 100%; width: 0; background: #3b7ddd;
+               transition: width .3s; }
+    #folder { color: #888; white-space: nowrap; overflow: hidden;
+              text-overflow: ellipsis; }
+    #note { color: #888; margin-top: 10px; }
+    #trial { background: #f5a62322; border: 1px solid #f5a62366; padding: 6px 8px;
+             border-radius: 4px; margin-bottom: 8px; }
+    #trial.over { background: #C4314B22; border-color: #C4314B66; }
+    a { color: inherit; }
   </style>
 </head>
 <body>
-  <button id="scan">Разобрать ящик</button>
+  <div id="trial" hidden></div>
+
+  <button id="start">Разобрать ящик целиком</button>
+  <button id="startRecent">Только новое</button>
+  <button id="stop" hidden>Остановить</button>
+
+  <div id="bar"><i></i></div>
+  <div id="folder"></div>
+
+  <h2>Разобрано</h2>
+  <table>
+    <tr><td class="k">папок</td><td class="v" id="folders">—</td></tr>
+    <tr><td class="k">писем в базе</td><td class="v" id="stored">—</td></tr>
+    <tr><td class="k">копий в других папках</td><td class="v" id="merged">—</td></tr>
+    <tr><td class="k">повторов пропущено</td><td class="v" id="dups">—</td></tr>
+    <tr><td class="k">скорость, писем/с</td><td class="v" id="rate">—</td></tr>
+    <tr><td class="k">времени</td><td class="v" id="elapsed">—</td></tr>
+    <tr><td class="k">ошибок</td><td class="v" id="errors">—</td></tr>
+  </table>
+
+  <div id="note"></div>
+
+  <h2>Состояние</h2>
   <button id="export">Выгрузить состояние в JSON</button>
-  <div id="status"></div>
+  <button id="settings">Настройки</button>
+
   <script type="module" src="panel.js"></script>
 </body>
 </html>
