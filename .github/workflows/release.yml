@@ -1,0 +1,74 @@
+# Сборка и релиз XPI.
+#
+#   push в main / PR   — прогон тестов;
+#   тег вида v0.2.0    — релизная сборка (обфускация + тесты на обфусцированном
+#                        коде) и выкладка XPI в GitHub Releases.
+#
+# Тег обязан совпадать с версией в manifest.json: иначе имя артефакта
+# (r7-triage-<версия>.xpi) разойдётся с тегом, и релиз будет вводить в
+# заблуждение. Расхождение — это ошибка сборки, а не мелочь.
+
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  release:
+    # Только на теге и только если тесты прошли.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # нужно, чтобы создать релиз и приложить файл
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - run: npm ci
+
+      - name: Тег должен совпадать с версией в manifest.json
+        run: |
+          VERSION="$(node -p "require('./manifest.json').version")"
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "manifest: $VERSION, тег: $TAG"
+          if [ "$VERSION" != "$TAG" ]; then
+            echo "::error::Тег $GITHUB_REF_NAME не совпадает с версией manifest.json ($VERSION)."
+            echo "Поднимите version в manifest.json или поправьте тег."
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      # build:release сам обфусцирует и прогоняет тесты на обфусцированном
+      # коде; если что-то сломалось — XPI не соберётся и шаг упадёт.
+      - name: Собрать релизный XPI
+        run: npm run build:release
+
+      - name: Проверить, что артефакт на месте
+        run: test -f "dist/r7-triage-${VERSION}.xpi"
+
+      - name: Выложить в Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/r7-triage-${VERSION}.xpi" \
+            --title "R7 Triage $GITHUB_REF_NAME" \
+            --generate-notes
