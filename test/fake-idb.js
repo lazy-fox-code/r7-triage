@@ -1,6 +1,7 @@
 // Минимальная IndexedDB для тестов. Ровно столько, сколько использует db.js:
-// хранилища, индексы (включая multiEntry), диапазоны, getAll/getAllKeys,
-// апгрейд версии, versionchange и удаление базы.
+// хранилища, индексы (включая multiEntry и составные), диапазоны,
+// getAll/getAllKeys, курсоры в обе стороны, апгрейд версии с транзакцией
+// апгрейда, versionchange и удаление базы.
 //
 // Зависимостей у проекта нет и заводить их ради тестов не хочется: fake-indexeddb
 // потянул бы node_modules в расширение, которое собирается zip-ом.
@@ -9,15 +10,27 @@ const DBS = new Map();
 
 const clone = (v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
 
-// Порядок ключей по спецификации: числа раньше строк.
+// Порядок ключей по спецификации: числа, затем строки, затем массивы;
+// массивы сравниваются поэлементно.
+const rankOf = (k) => (typeof k === "number" ? 0 : typeof k === "string" ? 1 : 2);
+
 function cmp(a, b) {
-  const ta = typeof a === "number" ? 0 : 1;
-  const tb = typeof b === "number" ? 0 : 1;
+  const ta = rankOf(a);
+  const tb = rankOf(b);
   if (ta !== tb) return ta - tb;
+  if (ta === 2) {
+    for (let i = 0; i < Math.min(a.length, b.length); i++) {
+      const c = cmp(a[i], b[i]);
+      if (c) return c;
+    }
+    return a.length - b.length;
+  }
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
 function valueAt(obj, keyPath) {
+  // Составной ключ: массив путей даёт массив значений.
+  if (Array.isArray(keyPath)) return keyPath.map((p) => valueAt(obj, p));
   return keyPath.split(".").reduce((o, k) => (o == null ? undefined : o[k]), obj);
 }
 
@@ -67,18 +80,48 @@ class FakeIndex {
     }
     return out.sort((a, b) => cmp(a[0], b[0]) || cmp(a[1], b[1]));
   }
+  #inRange(range) {
+    const rows = this.#entries();
+    return range ? rows.filter(([k]) => range.includes(k)) : rows;
+  }
   getAll(range, limit) {
     return this.store.tx._enqueue(() => {
-      let rows = this.#entries();
-      if (range) rows = rows.filter(([k]) => range.includes(k));
+      let rows = this.#inRange(range);
       if (limit) rows = rows.slice(0, limit);
       return rows.map(([, , v]) => clone(v));
     });
   }
+  count(range) {
+    return this.store.tx._enqueue(() => this.#inRange(range).length);
+  }
+  /**
+   * Курсор. Один и тот же запрос получает onsuccess на каждую запись и
+   * последний раз — с null, как в настоящей IndexedDB. Снимок данных
+   * берётся при открытии: тестам этого достаточно.
+   */
+  openCursor(range, direction = "next") {
+    const tx = this.store.tx;
+    const req = new FakeRequest(tx);
+    let rows = null;
+    let i = 0;
+    const step = () => tx._enqueue(() => {
+      if (!rows) {
+        rows = this.#inRange(range);
+        if (String(direction).startsWith("prev")) rows.reverse();
+      }
+      if (i >= rows.length) return null;
+      const [key, primaryKey, value] = rows[i++];
+      return { key, primaryKey, value: clone(value), continue: step };
+    }, req);
+    step();
+    return req;
+  }
 }
 
 function isValidKey(k) {
-  return typeof k === "number" ? Number.isFinite(k) : typeof k === "string";
+  if (Array.isArray(k)) return k.every(isValidKey);
+  // Бесконечности — допустимые ключи, NaN — нет.
+  return typeof k === "number" ? !Number.isNaN(k) : typeof k === "string";
 }
 
 class FakeObjectStore {
@@ -157,8 +200,7 @@ class FakeTransaction {
     if (!meta) throw new Error(`NotFoundError: хранилище ${name}`);
     return new FakeObjectStore(meta, this);
   }
-  _enqueue(fn) {
-    const req = new FakeRequest(this);
+  _enqueue(fn, req = new FakeRequest(this)) {
     this.pending++;
     queueMicrotask(() => {
       let ok = true;
@@ -236,6 +278,9 @@ export const fakeIndexedDB = {
         const oldVersion = rec.version;
         rec.upgradeTx = new FakeTransaction(db, "versionchange");
         rec.version = version;
+        // Миграция добавляет индексы к уже существующим хранилищам через
+        // транзакцию апгрейда — как `request.transaction` в настоящей базе.
+        req.transaction = rec.upgradeTx;
         try {
           req.onupgradeneeded?.({ oldVersion, newVersion: version, target: req });
         } catch (e) {
@@ -244,6 +289,7 @@ export const fakeIndexedDB = {
           return;
         }
         rec.upgradeTx = null;
+        req.transaction = null;
       }
 
       rec.connections.add(db);

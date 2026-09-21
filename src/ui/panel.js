@@ -14,7 +14,13 @@ function duration(ms) {
   return h ? `${h} ч ${m} мин` : m ? `${m} мин ${s % 60} с` : `${s} с`;
 }
 
-const PASS_NAME = { recent: "свежая почта", archive: "архив" };
+const PASS_NAME = {
+  recent: "свежая почта",
+  archive: "архив",
+  "enrich-recent": "заголовки свежей почты",
+  enrich: "заголовки архива",
+};
+const isEnrich = (pass) => String(pass ?? "").startsWith("enrich");
 
 function renderTrial(t) {
   if (!t) return;
@@ -26,22 +32,47 @@ function renderTrial(t) {
     : `Демоверсия: осталось ${formatLeft(t.msLeft)}`;
 }
 
+/**
+ * Проход обогащения. Число писем в очереди берётся из базы, а не из
+ * прогресса: так оно верно и когда проход не идёт.
+ */
+function renderEnrich(e, p) {
+  if (e?.counts) {
+    $("enrDone").textContent = num(e.counts.done);
+    $("enrPending").textContent = num(e.counts.pending);
+    $("enrSkipped").textContent = num(e.counts.skipped);
+    $("enrFailed").textContent = num(e.counts.failed);
+  }
+  const error = (isEnrich(p?.pass) ? p?.error : null) ?? e?.error;
+  $("enrNote").textContent = error ? `Остановлено: ${error}`
+    : isEnrich(p?.pass) && p?.running ? `Идёт: ${PASS_NAME[p.pass]}, ${num(p.rate)} писем/с.`
+    : e?.counts?.pending ? "Свежая почта дочитывается сразу, архив — в простое."
+    : "";
+}
+
 function render(state) {
   const p = state?.progress;
   const running = Boolean(state?.running);
 
   renderTrial(state?.trial);
+  renderEnrich(state?.enrich, p);
 
   $("start").hidden = running;
   $("startRecent").hidden = running;
+  $("startEnrich").hidden = running;
   $("stop").hidden = !running;
   $("stop").textContent = state?.stopping ? "Останавливается…" : "Остановить";
   $("stop").disabled = Boolean(state?.stopping);
 
-  if (!p) {
-    $("note").textContent = state?.counts?.messages
-      ? `В базе ${num(state.counts.messages)} писем. Проход не запущен.`
-      : "Проход ни разу не запускался.";
+  if (!p || isEnrich(p.pass)) {
+    // Прогресс обогащения показан в своём блоке; здесь — только проход по ящику.
+    if (!running || !p) {
+      $("note").textContent = state?.counts?.messages
+        ? `В базе ${num(state.counts.messages)} писем. Проход по ящику не запущен.`
+        : "Проход ни разу не запускался.";
+    } else {
+      $("note").textContent = "";
+    }
     return;
   }
 
@@ -74,6 +105,7 @@ async function start(scope) {
 
 $("start").addEventListener("click", () => start("all"));
 $("startRecent").addEventListener("click", () => start("recent"));
+$("startEnrich").addEventListener("click", () => start("enrich"));
 
 $("stop").addEventListener("click", async () => {
   render(await browser.runtime.sendMessage({ cmd: "scan.stop" }));
@@ -84,6 +116,7 @@ $("export").addEventListener("click", () => openTab("src/ui/state.html"));
 $("settings").addEventListener("click", () => browser.runtime.openOptionsPage());
 
 browser.runtime.onMessage.addListener((msg) => {
+  // Широковещательный прогресс без счётчиков базы: их обновит опрос.
   if (msg?.type === "scan.progress") render({ running: msg.progress.running, progress: msg.progress });
 });
 

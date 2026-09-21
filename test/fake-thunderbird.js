@@ -5,8 +5,13 @@
 //     другие номера, как настоящий клиент после перезапуска;
 //   · `continueList(id)` работает только с идентификатором живой сессии;
 //   · сравнение дат в запросе — строгое с обеих сторон. Это худший из
-//     возможных вариантов семантики, и проход обязан его переживать;
-//   · страница MessageList фиксированная, `messagesPerPage` в 115 ещё нет.
+//     возможных вариантов семантики, и проход обязан его переживать
+//     (настоящий 115 сравнивает включительно, с точностью до секунды);
+//   · страница MessageList фиксированная, `messagesPerPage` в 115 ещё нет;
+//   · `getFull` работает только с номером живой сессии и отдаёт дерево
+//     частей без contentDisposition — его, как в 115, надо брать из
+//     заголовков части; тело приложенного .ics — только через
+//     `getAttachmentFile`.
 
 const PAGE_SIZE = 100;
 
@@ -31,11 +36,22 @@ export class FakeThunderbird {
     this.pages = 0;
     this.onPage = null;         // хук для тестов: обрыв посреди прохода
     this.failFolders = new Set();
+    this.fullReads = 0;
+    this.fullLog = [];          // даты прочитанных getFull писем, по порядку
+    this.onFull = null;         // хук: обрыв посреди обогащения
+    this.failFull = null;       // (m) => true — сервер не отдаёт письмо
   }
 
-  addAccount(id, name = id) {
-    this.accounts.push({ id, name, type: "imap", identities: [] });
+  addAccount(id, name = id, identities = []) {
+    this.accounts.push({ id, name, type: "imap",
+      identities: identities.map((email) => ({ email })) });
     return this;
+  }
+
+  /** Письмо удалено или перенесено: из папки пропадает, номер умирает. */
+  removeMessage(folder, m) {
+    folder.messages = folder.messages.filter((x) => x !== m);
+    m.removed = true;
   }
 
   addFolder(accountId, path, { name, type } = {}) {
@@ -61,10 +77,12 @@ export class FakeThunderbird {
     this.idBase += 1_000_000;
     this.shuffleSeed = (this.shuffleSeed ?? 1) + 1;
     this.#ids = null;
+    this.#byId = null;
     return this;
   }
 
   #ids = null;
+  #byId = null;
 
   #idOf(m) {
     if (!this.#ids) {
@@ -73,9 +91,54 @@ export class FakeThunderbird {
       const rnd = mulberry32(this.shuffleSeed ?? 1);
       const order = all.map((x) => [rnd(), x]).sort((a, b) => a[0] - b[0]);
       this.#ids = new Map();
-      order.forEach(([, x], i) => this.#ids.set(x.uid, this.idBase + i));
+      this.#byId = new Map();
+      order.forEach(([, x], i) => {
+        this.#ids.set(x.uid, this.idBase + i);
+        this.#byId.set(this.idBase + i, x);
+      });
     }
     return this.#ids.get(m.uid);
+  }
+
+  #byNumber(id) {
+    if (!this.#byId) this.#idOf({ uid: -1 });
+    return this.#byId.get(id);
+  }
+
+  /** MessagePart, как его отдаёт getFull в 115. */
+  #full(m) {
+    const headers = {
+      "message-id": m.mid ? [m.mid] : [],
+      from: [m.author ?? ""],
+      subject: [m.subject ?? ""],
+      date: [new Date(m.date).toUTCString()],
+    };
+    for (const [k, v] of Object.entries(m.headers ?? {})) {
+      headers[k.toLowerCase()] = Array.isArray(v) ? v : [v];
+    }
+    const strip = (p) => {
+      // Содержимое файла вложения в getFull не приходит.
+      const { content, ...rest } = p;
+      if (rest.parts) rest.parts = rest.parts.map(strip);
+      return rest;
+    };
+    const parts = m.parts ?? [{
+      contentType: "text/plain", partName: "1", headers: {},
+      body: m.body ?? "", size: (m.body ?? "").length,
+    }];
+    return {
+      contentType: "message/rfc822", partName: "", size: m.size ?? 0,
+      headers, parts: m.headersOnly ? [] : parts.map(strip),
+    };
+  }
+
+  #part(parts, partName) {
+    for (const p of parts ?? []) {
+      if (p.partName === partName) return p;
+      const inner = this.#part(p.parts, partName);
+      if (inner) return inner;
+    }
+    return null;
   }
 
   #folder(spec) {
@@ -135,7 +198,7 @@ export class FakeThunderbird {
     const tb = this;
     return {
       accounts: {
-        async list() {
+        async list(_includeFolders = true) {
           return tb.accounts.map((a) => ({ ...a, folders: tb.#tree(a.id) }));
         },
       },
@@ -171,6 +234,24 @@ export class FakeThunderbird {
           tb.lists.delete(listId);
           return tb.#page(rest);
         },
+        async getFull(id) {
+          const m = tb.#byNumber(id);
+          if (!m || m.removed) throw new Error(`Message not found: ${id}`);
+          if (tb.failFull?.(m)) throw new Error("Сервер не отдал письмо");
+          tb.fullReads++;
+          tb.fullLog.push(m.date);
+          tb.onFull?.(tb, m);
+          return JSON.parse(JSON.stringify(tb.#full(m)));
+        },
+        async getAttachmentFile(id, partName) {
+          const m = tb.#byNumber(id);
+          const p = m && !m.removed ? tb.#part(m.parts, partName) : null;
+          if (!p) throw new Error(`Part not found: ${partName}`);
+          // File в 115; здесь достаточно его метода text().
+          const text = p.content ?? p.body ?? "";
+          return { name: p.name ?? "", type: p.contentType, size: text.length,
+            text: async () => text };
+        },
       },
     };
   }
@@ -187,7 +268,7 @@ export function generate(tb, {
 
   for (let a = 0; a < accounts; a++) {
     const id = `account${a + 1}`;
-    tb.addAccount(id, `Ящик ${a + 1}`);
+    tb.addAccount(id, `Ящик ${a + 1}`, ["me@example.ru"]);
     folders.push(tb.addFolder(id, "/INBOX", { name: "Входящие", type: "inbox" }));
     for (let i = 1; i < foldersPerAccount; i++) {
       folders.push(tb.addFolder(id, `/INBOX/Проект${i}`, { name: `Проект ${i}` }));

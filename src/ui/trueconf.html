@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>R7 Triage — TrueConf</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font: 14px/1.6 system-ui, sans-serif; margin: 0 auto; padding: 24px;
+           max-width: 900px; }
+    h1 { font-size: 18px; }
+    h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em;
+         color: #888; margin-top: 28px; }
+    label { display: block; margin-bottom: 10px; }
+    label > span { display: block; }
+    input[type=text], input[type=password] { width: 100%; padding: 5px;
+           box-sizing: border-box; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+           margin-bottom: 8px; }
+    .row input[type=text] { width: auto; flex: 1 1 200px; }
+    button { padding: 6px 12px; }
+    .hint, .muted { color: #888; font-size: 12px; }
+    .ok { color: #2d7a3e; }
+    .danger { color: #C4314B; }
+    code { background: #8882; padding: 1px 4px; border-radius: 3px; }
+    details { margin-bottom: 10px; }
+    #log { margin-top: 8px; }
+    .entry { border-top: 1px solid #8884; padding: 6px 0; }
+    .entry .head { font-variant-numeric: tabular-nums; }
+    .entry pre { background: #8881; padding: 8px; margin: 4px 0 0; overflow-x: auto;
+                 font-size: 12px; max-height: 320px; }
+  </style>
+</head>
+<body>
+  <h1>TrueConf: подключение и проверка запросов</h1>
+  <p class="muted">
+    Страница проверяет, какие запросы к вашему серверу TrueConf работают от
+    имени пользователя: вход без второго пароля, чат встречи, фактические
+    участники и беседы. Ответы показываются как есть. Сетевых адресатов у
+    расширения два — модель и этот сервер.
+  </p>
+
+  <h2>Подключение</h2>
+  <label><span>Сервер TrueConf</span>
+    <input type="text" id="server" placeholder="tc.corp.ru"></label>
+  <label><span>Версия API</span>
+    <input type="text" id="apiVersion" placeholder="v4.1"></label>
+  <label><span>ID OAuth-приложения</span>
+    <input type="text" id="clientId"></label>
+  <label><span>Секрет OAuth-приложения</span>
+    <input type="password" id="clientSecret" autocomplete="off">
+    <span class="hint">TrueConf требует секрет при обмене кода на токен. У этого
+      приложения администратор должен оставить только способы входа
+      <code>authorization_code</code> и <code>refresh_token</code>: тогда без
+      входа пользователя секрет ничего не открывает.</span></label>
+  <details>
+    <summary>Пути входа</summary>
+    <label><span>Страница входа</span>
+      <input type="text" id="authorizePath" placeholder="/oauth2/authorize"></label>
+    <label><span>Адрес выдачи токена (пусто — /api/&lt;версия&gt;/oauth2/token)</span>
+      <input type="text" id="tokenUrl"></label>
+  </details>
+  <p>Адрес возврата для OAuth-приложения (передать администратору):
+    <code id="redirect">—</code> <button id="copyRedirect">Скопировать</button></p>
+  <div class="row">
+    <button id="save">Сохранить и разрешить доступ к серверу</button>
+    <span id="saveStatus" class="muted"></span>
+  </div>
+
+  <h2>Вход</h2>
+  <p class="muted">Сначала без окна — сработает, если сервер пускает по
+    сохранённой сессии. Иначе откроется страница входа сервера; если вы уже
+    вошли через плагин TrueConf, пароль спрашиваться не должен. Отметьте, как
+    было на самом деле, — это и есть проверка.</p>
+  <div class="row">
+    <button id="login">Войти</button>
+    <button id="logout">Выйти</button>
+    <span id="session" class="muted">—</span>
+  </div>
+
+  <h2>Запросы Server API</h2>
+  <div class="row">
+    <input type="text" id="confId" placeholder="ID конференции, например 0005439837">
+  </div>
+  <div class="row">
+    <button data-q="me">Кто я</button>
+    <button data-q="conferences">Мои конференции</button>
+    <button data-q="conference">Конференция</button>
+    <button data-q="messages">Чат конференции</button>
+    <button data-q="participants">Участники (журнал)</button>
+    <button data-q="calls">Журнал звонков</button>
+  </div>
+  <div class="row">
+    <input type="text" id="customPath" placeholder="свой GET: путь после /api/v4.1/, например logs/calls">
+    <input type="text" id="customQuery" placeholder="параметры: page=1&page_size=20">
+    <button id="custom">Выполнить</button>
+  </div>
+
+  <h2>Беседы (Chatbot Connector)</h2>
+  <p class="muted">Личных и групповых бесед в Server API нет — они доступны через
+    Chatbot Connector. Сначала пробуем токен, полученный при входе выше. Если
+    коннектор его не примет, нужен отдельный токен по логину и паролю: пароль
+    уходит только на сервер TrueConf и не сохраняется, токен живёт месяц.</p>
+  <div class="row">
+    <button id="chatWithApi">Подключиться токеном входа</button>
+    <button id="chatWithSaved">Подключиться токеном бесед</button>
+    <span id="chatStatus" class="muted">не подключено</span>
+  </div>
+  <details>
+    <summary>Получить токен бесед по паролю</summary>
+    <div class="row">
+      <input type="text" id="chatUser" placeholder="логин TrueConf" autocomplete="username">
+      <input type="password" id="chatPass" placeholder="пароль" autocomplete="current-password">
+      <button id="chatToken">Получить токен</button>
+    </div>
+  </details>
+  <div class="row">
+    <button id="chats">Список бесед</button>
+    <input type="text" id="chatId" placeholder="ID беседы">
+    <button id="history">История беседы</button>
+  </div>
+
+  <h2>Журнал</h2>
+  <p class="muted">Ответы могут содержать переписку. Пересылая журнал, убедитесь,
+    что это согласовано. Токены и пароли в журнале обрезаны.</p>
+  <div class="row">
+    <button id="copyLog">Скопировать журнал</button>
+    <button id="clearLog">Очистить</button>
+  </div>
+  <div id="log"></div>
+
+  <script type="module" src="trueconf.js"></script>
+</body>
+</html>

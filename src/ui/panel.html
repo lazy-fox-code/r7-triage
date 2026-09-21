@@ -20,7 +20,7 @@
                transition: width .3s; }
     #folder { color: #888; white-space: nowrap; overflow: hidden;
               text-overflow: ellipsis; }
-    #note { color: #888; margin-top: 10px; }
+    #note, .note { color: #888; margin-top: 10px; }
     #trial { background: #f5a62322; border: 1px solid #f5a62366; padding: 6px 8px;
              border-radius: 4px; margin-bottom: 8px; }
     #trial.over { background: #C4314B22; border-color: #C4314B66; }
@@ -49,6 +49,16 @@
   </table>
 
   <div id="note"></div>
+
+  <h2>Полные заголовки</h2>
+  <table>
+    <tr><td class="k">дочитано</td><td class="v" id="enrDone">—</td></tr>
+    <tr><td class="k">в очереди</td><td class="v" id="enrPending">—</td></tr>
+    <tr><td class="k">пропущено по размеру</td><td class="v" id="enrSkipped">—</td></tr>
+    <tr><td class="k">не удалось</td><td class="v" id="enrFailed">—</td></tr>
+  </table>
+  <div id="enrNote" class="note"></div>
+  <button id="startEnrich">Дочитать заголовки сейчас</button>
 
   <h2>Состояние</h2>
   <button id="export">Выгрузить состояние в JSON</button>

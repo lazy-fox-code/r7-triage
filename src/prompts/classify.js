@@ -50,7 +50,9 @@ export function buildPrompt({ subject, from, senderLevel, body, features }) {
     senderLevel ? `Уровень отправителя: ${senderLevel}` : null,
     `Адресация: ${features.inTo ? "в поле Кому" : "в копии"}, ` +
       `всего получателей ${features.recipientCount}`,
-    features.isThreadStart ? "Начало переписки" : "Ответ в переписке",
+    // null — заголовки ветки не прочитаны; гадать за модель не будем.
+    features.isThreadStart == null ? null
+      : features.isThreadStart ? "Начало переписки" : "Ответ в переписке",
     `Тема: ${subject}`,
   ].filter(Boolean).join("\n");
 

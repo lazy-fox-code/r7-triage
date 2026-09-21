@@ -16,6 +16,7 @@
     "messagesRead",
     "messagesUpdate",
     "messagesTags",
+    "identity",
     "storage",
     "unlimitedStorage",
     "idle"

@@ -10,7 +10,9 @@ const DB_NAME = "r7-triage";
 // Thunderbird на устойчивый ключ из keys.js. Старое содержимое этих хранилищ
 // после такой смены бессмысленно — оно адресовано номерами, которых больше
 // не существует, — поэтому миграция их очищает.
-const DB_VERSION = 2;
+// v3: составной индекс очереди обогащения. Разобранное не трогает: индекс
+// строится поверх уже записанных писем.
+const DB_VERSION = 3;
 
 const STORES = ["messages", "edges", "people", "verdicts", "tasks", "meta"];
 
@@ -23,7 +25,7 @@ export function open() {
 
   _opening = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = (e) => migrate(req.result, e.oldVersion);
+    req.onupgradeneeded = (e) => migrate(req.result, e.oldVersion, req.transaction);
     req.onsuccess = () => {
       _db = req.result;
       // Другая вкладка или обновление расширения подняли версию: соединение
@@ -43,7 +45,7 @@ export function close() {
   if (_db) { _db.close(); _db = null; }
 }
 
-function migrate(db, oldVersion) {
+function migrate(db, oldVersion, tx) {
   if (oldVersion < 2) {
     // Хранилища, ключи которых сменили природу, пересоздаём.
     for (const name of ["messages", "verdicts"]) {
@@ -89,6 +91,13 @@ function migrate(db, oldVersion) {
       db.createObjectStore("meta", { keyPath: "key" });
     }
   }
+
+  if (oldVersion < 3) {
+    // Очередь прохода обогащения: письма с `enriched: 0`, от свежих к
+    // старым. Составной ключ [состояние, дата] позволяет взять следующую
+    // пачку курсором в обратном порядке, не поднимая в память весь ящик.
+    tx.objectStore("messages").createIndex("enrichQueue", ["enriched", "date"]);
+  }
 }
 
 // --- примитивы -----------------------------------------------------------
@@ -126,6 +135,33 @@ export async function getAllFromIndex(store, index, query, limit) {
 }
 
 /**
+ * Чтение и запись одной записи в одной транзакции. Проход обогащения
+ * дописывает поля к письму, и перечитать его нужно в той же транзакции:
+ * иначе можно затереть то, что успел дописать проход по ящику (например,
+ * новое место хранения).
+ *
+ * @param {(row: object) => object|null} fn новая запись; null — не писать
+ * @returns {Promise<object|null>} записанное, null — записи нет или fn отказалась
+ */
+export async function patch(store, key, fn) {
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    const t = db.transaction(store, "readwrite");
+    const s = t.objectStore(store);
+    let out = null;
+    const r = s.get(key);
+    r.onsuccess = () => {
+      if (r.result === undefined) return;
+      out = fn(r.result) ?? null;
+      if (out) s.put(out);
+    };
+    t.oncomplete = () => resolve(out);
+    t.onabort = () => reject(t.error ?? new Error("транзакция прервана"));
+    t.onerror = () => reject(t.error);
+  });
+}
+
+/**
  * Пакетная запись. Вся страница пишется одной транзакцией: либо страница
  * записана целиком, либо не записана вовсе, и чекпойнт за ней не сдвинется.
  */
@@ -160,6 +196,54 @@ export async function messagesInDateRange(from, to) {
   return getAllFromIndex("messages", "date", range);
 }
 
+// --- очередь обогащения ---------------------------------------------------
+// Состояние письма в поле `enriched`. Число, а не булево: булевы значения
+// не являются ключами IndexedDB и в индекс не попали бы.
+
+export const ENRICH = { PENDING: 0, DONE: 1, SKIPPED: 2, FAILED: -1 };
+
+function enrichRange(state, since = null, until = null) {
+  return IDBKeyRange.bound([state, since ?? -Infinity], [state, until ?? Infinity]);
+}
+
+/**
+ * Следующая пачка писем в заданном состоянии, от свежих к старым.
+ *
+ * @param {number|null} since мс; письма старше не берём (свежий проход)
+ * @param {number|null} until мс; письма новее не берём (ещё не сохранены офлайн)
+ */
+export async function enrichQueue({
+  state = ENRICH.PENDING, since = null, until = null, limit = 500,
+} = {}) {
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    const t = db.transaction("messages", "readonly");
+    const idx = t.objectStore("messages").index("enrichQueue");
+    const out = [];
+    const req = idx.openCursor(enrichRange(state, since, until), "prev");
+    req.onsuccess = () => {
+      const c = req.result;
+      if (!c) return;
+      out.push(c.value);
+      if (out.length < limit) c.continue();
+    };
+    t.oncomplete = () => resolve(out);
+    t.onabort = () => reject(t.error ?? new Error("транзакция прервана"));
+    t.onerror = () => reject(t.error);
+  });
+}
+
+/** Сколько писем в каждом состоянии обогащения. Для панели. */
+export async function enrichCounts() {
+  const db = await open();
+  const out = {};
+  for (const [name, state] of Object.entries(ENRICH)) {
+    out[name.toLowerCase()] = await request(db, "messages", "readonly",
+      (s) => s.index("enrichQueue").count(enrichRange(state)));
+  }
+  return out;
+}
+
 export async function messagesInFolder(fkeyOrFolder) {
   const key = typeof fkeyOrFolder === "string"
     ? fkeyOrFolder : folderKey(fkeyOrFolder);
@@ -187,8 +271,29 @@ export const checkpoint = {
   },
 };
 
+// --- служебные записи ----------------------------------------------------
+// Состояние проходов, у которых позиция не в чекпойнте папок: обогащение,
+// замеры гейта. Ключи не пересекаются с `scan:*`.
+
+export const meta = {
+  async get(key) {
+    return (await get("meta", key))?.value ?? null;
+  },
+  async set(key, value) {
+    return put("meta", { key, value, savedAt: Date.now() });
+  },
+};
+
 // --- выгрузка ------------------------------------------------------------
 // Нужна с первого дня: IndexedDB нельзя открыть снаружи и посмотреть.
+//
+// Кроме секретов. Токены доступа к TrueConf лежат в `meta` под ключами
+// `secret:*` и в выгрузку не попадают: файл выгрузки пересылают, прикладывают
+// к заявкам, а токен в нём — это вход в чужую учётную запись.
+
+const SECRET_PREFIX = "secret:";
+const exportable = (store, row) =>
+  store !== "meta" || !String(row?.key ?? "").startsWith(SECRET_PREFIX);
 
 export async function stats() {
   const out = {};
@@ -203,7 +308,7 @@ export async function stats() {
  * открытой на всю выгрузку нельзя: она закрывается, как только цикл событий
  * остаётся без запросов к ней.
  */
-async function pages(store, batch, onPage) {
+export async function pages(store, batch, onPage) {
   const db = await open();
   let lower = null;
   for (;;) {
@@ -243,7 +348,9 @@ export async function exportChunks(write, { batch = 2000 } = {}) {
     await write(`${firstStore ? "" : ","}\n"${name}": [`);
     firstStore = false;
     let firstRow = true;
-    await pages(name, batch, async (rows) => {
+    await pages(name, batch, async (all) => {
+      const rows = all.filter((r) => exportable(name, r));
+      if (!rows.length) return;
       const text = rows.map((r) => JSON.stringify(r)).join(",\n");
       await write((firstRow ? "\n" : ",\n") + text);
       firstRow = false;
@@ -258,7 +365,9 @@ export async function exportAll() {
   const out = { stores: {} };
   for (const name of STORES) {
     out.stores[name] = [];
-    await pages(name, 2000, (rows) => { out.stores[name].push(...rows); });
+    await pages(name, 2000, (rows) => {
+      out.stores[name].push(...rows.filter((r) => exportable(name, r)));
+    });
   }
   out.meta = { exportedAt: new Date().toISOString(), dbVersion: DB_VERSION };
   return out;
