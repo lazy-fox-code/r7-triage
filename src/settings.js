@@ -12,6 +12,9 @@ export const DEFAULTS = {
   llm: {
     endpoint: "",
     model: "",
+    // Ключ доступа, если общий инференс-хост его требует: уходит заголовком
+    // Authorization: Bearer только на эндпоинт модели.
+    apiKey: "",
     concurrency: 3,
     bodyLimit: 4000,
     timeoutMs: 60000,

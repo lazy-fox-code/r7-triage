@@ -41,7 +41,12 @@ export const STAGES = [
     ["t3.speed", "Время на письмо приемлемо (медиана — в комментарии)"],
   ] },
   { id: "T4", title: "Граф и вкладка «Дела»", checks: [
-    ["t4.design", "Макеты вкладки «Дела» получены от дизайнера"],
+    ["t4.button", "Кнопка «Дела» на панели пространств открывает вкладку, бейдж показывает новые дела"],
+    ["t4.grow", "Пока идёт обогащение, граф растёт: письма прирастают к делам, лента пишет почему"],
+    ["t4.cases", "Проверены 10 случайных дел: письма одного дела вместе, разных — порознь (ошибки — в комментарии)"],
+    ["t4.actions", "«Открыть в почте» и «Черновик ответа» работают; письмо само не отправляется"],
+    ["t4.refresh", "«Обновить» дочитывает свежие письма; предупреждение про Exchange понятно"],
+    ["t4.perf", "Вкладка открывается быстро, граф не тормозит"],
   ] },
   { id: "T5", title: "Уровень отправителя", checks: [
     ["t5.book", "Адресная книга организации (GAL/AD) видна в Органайзере"],
@@ -125,7 +130,24 @@ function scanSummary(checkpoints) {
  * Все автоматические метрики. Зависимости внедряются — страница передаёт
  * настоящие, тесты свои.
  */
-export async function collect({ db, cfg, env, gate, me, trueconfSession }) {
+/** Сводка по делам за 30 дней — из buildCases, только числа. */
+export function casesSummary(cases, cross) {
+  const sizes = cases.map((c) => c.counts.mail).sort((a, b) => a - b);
+  return {
+    cases: cases.length,
+    fresh: cases.filter((c) => c.state === "new").length,
+    withMeetings: cases.filter((c) => c.counts.meet).length,
+    withConferences: cases.filter((c) => c.counts.conf).length,
+    joinedByMeeting: cases.filter((c) => c.joinedBy.meeting).length,
+    joinedByOutlook: cases.filter((c) => c.joinedBy.outlook && !c.joinedBy.thread).length,
+    singleLetter: sizes.filter((n) => n === 1).length,
+    medianLetters: sizes.length ? sizes[Math.floor(sizes.length / 2)] : 0,
+    maxLetters: sizes.length ? sizes[sizes.length - 1] : 0,
+    crossLinks: cross.length,
+  };
+}
+
+export async function collect({ db, cfg, env, gate, me, trueconfSession, cases = null }) {
   const enrichState = await db.meta.get("enrich");
   return {
     T1: {
@@ -153,6 +175,7 @@ export async function collect({ db, cfg, env, gate, me, trueconfSession }) {
       concurrency: cfg.llm.concurrency,
       check: await db.meta.get("report:model"),
     },
+    T4: { cases },
     T5: { check: await db.meta.get("report:directory") },
     T9: {
       serverSet: Boolean(cfg.trueconf.server),
@@ -215,6 +238,10 @@ function headline(id, a) {
       if (!c.configured) return c.error;
       return `JSON ${c.validJson}/${c.total}, верно ${c.correct}/${c.total}, ` +
         `медиана ${duration(c.latencyMs?.median)}${c.reasoningDetected ? ", РАССУЖДАЮЩАЯ" : ""}`;
+    }
+    case "T4": {
+      const c = a.T4.cases;
+      return c ? `дел за 30 дней ${num(c.cases)}, новых ${num(c.fresh)}, со встречами ${num(c.withMeetings)}` : "";
     }
     case "T5": {
       const c = a.T5.check;
@@ -296,6 +323,18 @@ function stageDetails(id, a) {
         );
       }
       return table(["Показатель", "Значение"], rows);
+    }
+    case "T4": {
+      const c = a.T4.cases;
+      if (!c) return "";
+      return table(["Показатель", "Значение"], [
+        ["Дел за 30 дней / новых (есть непрочитанное)", `${num(c.cases)} / ${num(c.fresh)}`],
+        ["Со встречами / с конференциями", `${num(c.withMeetings)} / ${num(c.withConferences)}`],
+        ["Склеены по встрече / только по беседе Outlook", `${num(c.joinedByMeeting)} / ${num(c.joinedByOutlook)}`],
+        ["Из одного письма", num(c.singleLetter)],
+        ["Писем в деле: медиана / максимум", `${num(c.medianLetters)} / ${num(c.maxLetters)}`],
+        ["Связей между делами через конференции", num(c.crossLinks)],
+      ]);
     }
     case "T5": {
       const c = a.T5.check;

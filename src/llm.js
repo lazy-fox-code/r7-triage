@@ -9,10 +9,11 @@
 import { VERDICT_SCHEMA, buildPrompt } from "./prompts/classify.js";
 
 export class LlmClient {
-  constructor({ endpoint, model, concurrency = 3, timeoutMs = 60000,
+  constructor({ endpoint, model, apiKey = "", concurrency = 3, timeoutMs = 60000,
     fetch = (...a) => globalThis.fetch(...a) }) {
     this.endpoint = endpoint.replace(/\/$/, "");
     this.model = model;
+    this.apiKey = apiKey;
     this.timeoutMs = timeoutMs;
     this.fetch = fetch;
     this.sem = new Semaphore(concurrency);
@@ -57,7 +58,10 @@ export class LlmClient {
     try {
       const r = await this.fetch(`${this.endpoint}/v1/chat/completions`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
+        },
         body: JSON.stringify(payload),
         signal: ctl.signal,
       });

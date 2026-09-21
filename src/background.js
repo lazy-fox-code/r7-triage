@@ -11,6 +11,9 @@
 //   archive        всё, что старше. Только в простое, уступает свежему.
 //   enrich         полные заголовки всего остального. Только в простое:
 //                  getFull читает письмо целиком и может тянуть его с сервера.
+//   enrich-now     «Обновить» во вкладке «Дела»: свежая почта без задержки —
+//                  сознательно, с предупреждением, что письма моложе
+//                  `freshDelayMinutes` клиент заберёт из Exchange.
 //
 // Одновременно идёт один проход. Шаги выстраиваются в цепочки; «Остановить»
 // обрывает цепочку целиком, а не только текущий шаг.
@@ -23,6 +26,8 @@ import { Scanner } from "./scan.js";
 import { Enricher } from "./enrich.js";
 import { myAddresses } from "./me.js";
 import { gateReport } from "./report.js";
+import { buildCases } from "./cases.js";
+import { findHeader } from "./locate.js";
 import * as settings from "./settings.js";
 import * as trial from "./trial.js";
 
@@ -31,6 +36,10 @@ const RECENT = "recent";
 const ARCHIVE = "archive";
 const ENRICH_RECENT = "enrich-recent";
 const ENRICH = "enrich";
+const ENRICH_NOW = "enrich-now";
+const CASES_PAGE = "src/ui/cases.html";
+const CASES_BUTTON = "cases";
+const CASES_DAYS = 30;
 // Идут только в простое и уступают вернувшемуся пользователю.
 const IDLE_ONLY = new Set([ARCHIVE, ENRICH]);
 const PROGRESS_THROTTLE_MS = 500;
@@ -43,6 +52,7 @@ let lastProgress = null;
 let lastEmit = 0;
 let newMailTimer = null;
 let freshTimer = null;
+let badgeTimer = null;
 
 function broadcast(progress, force = false) {
   lastProgress = progress;
@@ -68,15 +78,15 @@ function makeJob(id, cfg) {
     return { runner, start: () => runner.run(id, bounds) };
   }
 
+  // «Обновить» во вкладке — по явной команде и без задержки для свежих писем.
+  const config = id === ENRICH_NOW ? { ...cfg.enrich, freshDelayMinutes: 0 } : cfg.enrich;
   const runner = new Enricher({
-    browser, db, config: cfg.enrich,
+    browser, db, config,
     hosts: cfg.trueconf.hosts, overlapDays: cfg.scan.overlapDays, onProgress,
   });
   // Неудачи прошлых раз возвращаются в очередь только на полном проходе:
   // свежему незачем тратить время на старые хвосты.
-  const opts = id === ENRICH_RECENT
-    ? { since: recentEdge(cfg) }
-    : { since: null, requeue: true };
+  const opts = id === ENRICH ? { since: null, requeue: true } : { since: recentEdge(cfg) };
   return { runner, start: () => runner.run(opts) };
 }
 
@@ -94,7 +104,7 @@ async function runPass(id, { preempt = false } = {}) {
   }
 
   const cfg = await settings.load();
-  if ((id === ENRICH || id === ENRICH_RECENT) && !cfg.enrich.enabled) return null;
+  if ((id === ENRICH || id === ENRICH_RECENT || id === ENRICH_NOW) && !cfg.enrich.enabled) return null;
 
   // Проверка и запуск — без await между ними: пока ждали вытесненный
   // проход, мог стартовать третий, и два прохода сразу — это проход по
@@ -114,7 +124,10 @@ async function runPass(id, { preempt = false } = {}) {
       broadcast({ ...(lastProgress ?? {}), pass: id, running: false,
         error: String(e?.message ?? e) }, true);
     })
-    .finally(() => { if (active?.runner === runner) active = null; });
+    .finally(() => {
+      if (active?.runner === runner) active = null;
+      scheduleBadge();
+    });
 
   active = { id, runner, promise };
   return promise;
@@ -166,6 +179,12 @@ const scanAll = () => sequence([
   [ENRICH_RECENT, {}],
   [ARCHIVE, { preempt: true }],
   [ENRICH, { preempt: true }],
+]);
+
+/** «Обновить» во вкладке «Дела»: свежая почта и её заголовки прямо сейчас. */
+const refreshNow = () => sequence([
+  [RECENT, { preempt: true }],
+  [ENRICH_NOW, { preempt: true }],
 ]);
 
 function stopAll() {
@@ -251,6 +270,10 @@ async function status() {
   }));
 
   const enrich = await db.meta.get("enrich");
+  const cfg = await settings.load();
+  const freshDelay = cfg.enrich.freshDelayMinutes;
+  const young = freshDelay
+    ? await db.countEnrich(db.ENRICH.PENDING, Date.now() - freshDelay * 60000) : 0;
   return {
     ...s,
     pass: active?.id ?? null,
@@ -261,6 +284,10 @@ async function status() {
       counts: await db.enrichCounts(),
       error: enrich?.error ?? null,
       finishedAt: enrich?.finishedAt ?? null,
+      savedAt: enrich?.savedAt ?? null,
+      young,
+      freshDelayMinutes: freshDelay,
+      enabled: cfg.enrich.enabled,
     },
     trial: await trial.state(),
   };
@@ -277,6 +304,71 @@ async function runGateReport() {
   return report;
 }
 
+// --- вкладка «Дела» -----------------------------------------------------------
+
+/**
+ * Кнопка «Дела» на панели пространств (spacesToolbar, с TB 100): открывает
+ * вкладку и показывает бейдж — сколько дел с непрочитанными письмами.
+ */
+async function installCasesButton() {
+  if (!browser.spacesToolbar) return;
+  const icon = (theme) => `src/ui/icons/cases-${theme}.svg`;
+  try {
+    await browser.spacesToolbar.addButton(CASES_BUTTON, {
+      title: "Дела",
+      url: browser.runtime.getURL(CASES_PAGE),
+      defaultIcons: "src/ui/icons/cases-dark.svg",
+      // dark — значок для светлой темы, light — для тёмной.
+      themeIcons: [16, 32].map((size) => ({ dark: icon("dark"), light: icon("light"), size })),
+    });
+  } catch (e) {
+    console.warn("r7-triage: кнопка «Дела» не добавлена", e);
+  }
+  scheduleBadge();
+}
+
+/** Бейдж пересчитывается после каждого прохода, не чаще раза в 10 с. */
+function scheduleBadge() {
+  clearTimeout(badgeTimer);
+  badgeTimer = setTimeout(() => updateBadge().catch(() => {}), 10000);
+}
+
+async function updateBadge() {
+  const cfg = await settings.load();
+  const me = await myAddresses(browser, cfg.me.aliases);
+  const rows = await db.messagesInDateRange(Date.now() - CASES_DAYS * DAY, null);
+  const { cases } = buildCases(rows, { me, gateCfg: cfg.gate });
+  const fresh = cases.filter((c) => c.state === "new").length;
+  try {
+    await browser.spacesToolbar?.updateButton(CASES_BUTTON, {
+      badgeText: fresh ? (fresh > 99 ? "99+" : String(fresh)) : "",
+      badgeBackgroundColor: "#0f6cbd",
+    });
+  } catch { /* кнопки нет — клиент без панели пространств */ }
+  return { fresh, cases: cases.length };
+}
+
+async function sessionHeader(id) {
+  const row = await db.get("messages", id);
+  if (!row) throw new Error("письма нет в базе");
+  const hdr = await findHeader(browser, row);
+  if (!hdr) throw new Error("письмо не найдено в папках — возможно, перенесено или удалено");
+  return hdr;
+}
+
+async function openLetter(id) {
+  const hdr = await sessionHeader(id);
+  await browser.messageDisplay.open({ messageId: hdr.id, location: "tab" });
+  return { ok: true };
+}
+
+/** Только черновик: окно ответа открывается, отправляет человек. */
+async function replyToLetter(id) {
+  const hdr = await sessionHeader(id);
+  await browser.compose.beginReply(hdr.id, "replyToAll");
+  return { ok: true };
+}
+
 browser.runtime.onMessage.addListener((msg) => {
   switch (msg?.cmd) {
     case "scan.start":
@@ -290,9 +382,14 @@ browser.runtime.onMessage.addListener((msg) => {
     case "scan.forget": return db.checkpoint.clear(msg.scanId).then(() => ({ ok: true }));
     case "db.stats":    return db.stats();
     case "gate.report": return runGateReport();
+    case "cases.refresh": refreshNow(); return status();
+    case "cases.badge":  return updateBadge();
+    case "letter.open":  return openLetter(msg.id);
+    case "letter.reply": return replyToLetter(msg.id);
     case "db.reset":    return db.reset().then(() => ({ ok: true }));
     default:            return undefined;
   }
 });
 
 installIdleWatch();
+installCasesButton();

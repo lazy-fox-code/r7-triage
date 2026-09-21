@@ -233,6 +233,12 @@ export async function enrichQueue({
   });
 }
 
+/** Сколько писем в состоянии обогащения в диапазоне дат. */
+export async function countEnrich(state, since = null, until = null) {
+  return request(await open(), "messages", "readonly",
+    (s) => s.index("enrichQueue").count(enrichRange(state, since, until)));
+}
+
 /** Сколько писем в каждом состоянии обогащения. Для панели. */
 export async function enrichCounts() {
   const db = await open();

@@ -52,6 +52,7 @@ const { Semaphore } = await import(`${SRC}llm.js`);
 const { checkModel, SAMPLES } = await import(`${SRC}model-check.js`);
 const { checkDirectory } = await import(`${SRC}directory-check.js`);
 const report = await import(`${SRC}check-report.js`);
+const { buildCases, diffCases, displaySubject } = await import(`${SRC}cases.js`);
 const trial = await import(`${SRC}trial.js`);
 // В релизной сборке дата впечена (см. scripts/build.mjs), и якорь срока — она,
 // а не установка. Тесты срока подстраиваются под текущий якорь.
@@ -1150,6 +1151,94 @@ test("отчёт о проверке: метрики по стадиям, руч
     "me@example.ru", "ivanov@example.ru", "news@", "\"subject\""]) {
     assert(!md.includes(secret), `в отчёте нет «${secret}»`);
   }
+});
+
+
+// --- T4: дела из писем -------------------------------------------------------
+
+/** Запись письма, как её оставляют проход и обогащение. */
+function letter(id, extra = {}) {
+  const key = `m:${id}@example.ru`;
+  return {
+    id: key, date: Date.now() - (extra.ageH ?? 1) * 3600000, subject: extra.subject ?? id,
+    fromId: extra.from ?? "ivanov@example.ru", fromName: extra.fromName ?? "Иванов Иван",
+    to: extra.to ?? ["me@example.ru"], cc: extra.cc ?? [], read: extra.read ?? true,
+    enriched: 1, threadId: extra.threadId ?? key, thread: extra.thread ?? { root: null, parent: null, index: null },
+    calendar: extra.calendar ?? [], conferences: extra.conferences ?? [], attachments: extra.attachments ?? [],
+    bulk: extra.bulk ?? null, locations: ["account1|/INBOX"],
+  };
+}
+
+test("дела: ветка, беседа Outlook и встреча склеиваются, рассылки — нет", async () => {
+  const me = new Set(["me@example.ru"]);
+  const rows = [
+    letter("root", { subject: "Договор с подрядчиком", ageH: 50 }),
+    letter("r1", { subject: "RE: Договор с подрядчиком", ageH: 40, threadId: "m:root@example.ru",
+      thread: { root: "m:root@example.ru", parent: "m:root@example.ru", index: null } }),
+    letter("r2", { subject: "RE: RE: Договор", ageH: 30, threadId: "m:root@example.ru",
+      thread: { root: "m:root@example.ru", parent: "m:r1@example.ru", index: null }, read: false }),
+    // Outlook без References, но в той же беседе по Thread-Index.
+    letter("o1", { subject: "Смета", ageH: 20, thread: { root: null, parent: null, index: "ti:aa" } }),
+    letter("o2", { subject: "Смета", ageH: 10, thread: { root: null, parent: null, index: "ti:aa" } }),
+    // Приглашение и его перенос — разные ветки, одна встреча.
+    letter("inv", { subject: "Сверка", ageH: 9, calendar: [{ kind: "meeting", method: "REQUEST", uid: "U1", sequence: 0, summary: "Сверка" }] }),
+    letter("upd", { subject: "Перенос: Сверка", ageH: 8, calendar: [{ kind: "meeting", method: "REQUEST", uid: "U1", sequence: 1, summary: "Сверка (перенос)" }] }),
+    // Рассылка делом не становится.
+    letter("news", { subject: "Дайджест", ageH: 5, bulk: { listId: "<news.example.ru>" } }),
+  ];
+  const { cases } = buildCases(rows, { me });
+  equal(cases.length, 3, "дел: ветка, беседа, встреча");
+
+  const byTitle = Object.fromEntries(cases.map((c) => [c.title, c]));
+  const contract = byTitle["Договор с подрядчиком"];
+  equal(contract.counts.mail, 3, "ответ на ответ — в той же ветке");
+  equal(contract.state, "new", "непрочитанный ответ — дело новое");
+  equal(contract.letters[0].why, "начало ветки", "первое письмо — начало ветки");
+  equal(contract.letters[2].why, "та же ветка", "почему в деле");
+
+  const smeta = byTitle["Смета"];
+  equal(smeta.counts.mail, 2, "беседа Outlook склеена по Thread-Index");
+  equal(smeta.joinedBy.outlook, true, "склеено по беседе Outlook");
+
+  const meet = byTitle["Сверка"];
+  equal(meet.counts.mail, 2, "приглашение и перенос — одно дело");
+  equal(meet.counts.meet, 1, "одна встреча");
+  equal(meet.meetings[0].summary, "Сверка (перенос)", "последняя версия встречи");
+  assert(meet.letters[1].why.startsWith("та же встреча"), "почему в деле — та же встреча");
+  assert(!cases.some((c) => c.title === "Дайджест"), "рассылки в делах нет");
+});
+
+test("дела: конференция связывает дела, но не склеивает; свои письма не делают дело новым", async () => {
+  const me = new Set(["me@example.ru"]);
+  const conf = { key: "tc:tc|0005|планерка", id: "0005", topic: "Планёрка", host: "tc" };
+  const rows = [
+    letter("a", { subject: "Отчёт за квартал", conferences: [conf], read: false, from: "me@example.ru" }),
+    letter("b", { subject: "Бюджет", conferences: [conf] }),
+  ];
+  const { cases, cross } = buildCases(rows, { me });
+  equal(cases.length, 2, "одна комната — два разных дела");
+  equal(cross.length, 1, "связь между делами");
+  equal(cross[0].kind, "conf", "связь — через конференцию");
+  assert(cross[0].why.includes("0005"), "в связи назван номер");
+  const report = cases.find((c) => c.title === "Отчёт за квартал");
+  equal(report.state, "branch", "своё непрочитанное письмо — не новость");
+  equal(report.people.length, 0, "себя в участниках нет");
+});
+
+test("дела: разница между сборками — новое дело и письмо, пришедшее в известное дело", async () => {
+  const me = new Set(["me@example.ru"]);
+  const before = buildCases([letter("root", { subject: "Договор", ageH: 5 })], { me }).cases;
+  const after = buildCases([
+    letter("root", { subject: "Договор", ageH: 5 }),
+    letter("r1", { subject: "RE: Договор", ageH: 1, threadId: "m:root@example.ru",
+      thread: { root: "m:root@example.ru", parent: "m:root@example.ru", index: null } }),
+    letter("x", { subject: "Новая тема", ageH: 1 }),
+  ], { me }).cases;
+  const ev = diffCases(before, after);
+  equal(ev.filter((e) => e.kind === "letter").length, 1, "одно письмо в известное дело");
+  equal(ev.filter((e) => e.kind === "case").length, 1, "одно новое дело");
+  equal(before[0].id, after.find((c) => c.title === "Договор").id, "id дела не меняется с приходом писем");
+  equal(displaySubject("RE: FW: Отв: Договор"), "Договор", "название дела без приставок");
 });
 
 // --- вспомогательное -----------------------------------------------------

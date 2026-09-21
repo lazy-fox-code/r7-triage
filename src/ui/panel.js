@@ -114,6 +114,7 @@ $("stop").addEventListener("click", async () => {
 const openTab = (page) => browser.tabs.create({ url: browser.runtime.getURL(page) });
 $("export").addEventListener("click", () => openTab("src/ui/state.html"));
 $("report").addEventListener("click", () => openTab("src/ui/report.html"));
+$("openCases").addEventListener("click", () => openTab("src/ui/cases.html"));
 $("settings").addEventListener("click", () => browser.runtime.openOptionsPage());
 
 browser.runtime.onMessage.addListener((msg) => {

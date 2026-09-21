@@ -8,6 +8,7 @@
     body { font: 13px/1.5 system-ui, sans-serif; margin: 0; padding: 12px;
            width: 340px; }
     button { width: 100%; padding: 8px; margin-bottom: 6px; }
+    button.primary { background: #0072c6; color: #fff; border: 1px solid #0072c6; border-radius: 3px; }
     h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em;
          color: #888; margin: 14px 0 6px; }
     table { width: 100%; border-collapse: collapse; }
@@ -29,6 +30,8 @@
 </head>
 <body>
   <div id="trial" hidden></div>
+
+  <button id="openCases" class="primary">Открыть «Дела»</button>
 
   <button id="start">Разобрать ящик целиком</button>
   <button id="startRecent">Только новое</button>

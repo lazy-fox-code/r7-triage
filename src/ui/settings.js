@@ -17,6 +17,7 @@ async function fill() {
   const cfg = await settings.load();
   $("endpoint").value = cfg.llm.endpoint;
   $("model").value = cfg.llm.model;
+  $("apiKey").value = cfg.llm.apiKey;
   for (const k of LLM_NUM) $(k).value = cfg.llm[k];
   for (const k of SCAN_NUM) $(k).value = cfg.scan[k];
   $("excludeFolderTypes").value = cfg.scan.excludeFolderTypes.join(", ");
@@ -65,7 +66,7 @@ $("save").addEventListener("click", async () => {
       "Остальные настройки сохранены.";
   }
 
-  const llm = { endpoint, model: $("model").value.trim() };
+  const llm = { endpoint, model: $("model").value.trim(), apiKey: $("apiKey").value.trim() };
   for (const k of LLM_NUM) llm[k] = Number($(k).value);
 
   const scan = { excludeFolderTypes: list($("excludeFolderTypes").value) };

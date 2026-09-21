@@ -4,7 +4,8 @@ import * as db from "../db.js";
 import * as settings from "../settings.js";
 import * as trial from "../trial.js";
 import { BUILD_DATE_MS } from "../build-info.js";
-import { STAGES, STATUS, collect, renderMarkdown } from "../check-report.js";
+import { STAGES, STATUS, collect, renderMarkdown, casesSummary } from "../check-report.js";
+import { buildCases } from "../cases.js";
 import { gateReport } from "../report.js";
 import { myAddresses } from "../me.js";
 import { checkModel } from "../model-check.js";
@@ -32,6 +33,11 @@ function stageBlock(st) {
   if (st.id === "T3") {
     section.append(actionRow("Проверить модель на 6 эталонных письмах", runModelCheck,
       "Уходят только выдуманные письма, реальная почта в модель не отправляется."));
+    section.append(requestBlock("Что запросить у команды LLM", "llmRequest", "запрос-команде-llm.txt"));
+  }
+  if (st.id === "T4") {
+    section.append(actionRow("Открыть вкладку «Дела»", () =>
+      browser.tabs.create({ url: browser.runtime.getURL("src/ui/cases.html") })));
   }
   if (st.id === "T5") {
     const row = actionRow("Проверить адресные книги", runDirectoryCheck,
@@ -106,6 +112,79 @@ function actionRow(label, fn, hint) {
   return row;
 }
 
+/** Готовый текст запроса: показать, скопировать, сохранить файлом. */
+function requestBlock(title, id, filename) {
+  const box = document.createElement("details");
+  const sum = document.createElement("summary");
+  sum.textContent = title;
+  const pre = document.createElement("pre");
+  pre.id = id;
+  pre.style.whiteSpace = "pre-wrap";
+  const row = document.createElement("div");
+  row.className = "row";
+  const copy = document.createElement("button");
+  copy.textContent = "Скопировать";
+  copy.addEventListener("click", () => navigator.clipboard.writeText(pre.textContent));
+  const save = document.createElement("button");
+  save.textContent = "Сохранить файлом";
+  save.addEventListener("click", () => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([pre.textContent], { type: "text/plain" }));
+    a.download = filename;
+    document.body.append(a); a.click(); a.remove();
+  });
+  row.append(copy, save);
+  box.append(sum, pre, row);
+  return box;
+}
+
+/**
+ * Запрос команде LLM. Объём — по этому ящику: писем в день за 30 дней и
+ * доля писем, которые отсев без модели не снимает.
+ */
+function llmRequestText({ perDay, modelShare, check }) {
+  const toModel = perDay != null && modelShare != null ? Math.round(perDay * modelShare) : null;
+  return [
+    "Запрос команде LLM — расширение R7 Triage для Р7-Органайзера",
+    "",
+    "Расширение разбирает почту сотрудника: поручение, информирование или шум.",
+    "Очевидное (рассылки, автоответы) снимается без модели; остальное уходит в",
+    "модель: тема, отправитель и до 4000 знаков текста письма. Ответ — JSON по",
+    "схеме. Других сетевых адресатов, кроме модели и сервера TrueConf, нет.",
+    "",
+    "Что нужно от эндпоинта:",
+    "1. OpenAI-совместимый POST /v1/chat/completions во внутренней сети; HTTPS",
+    "   с сертификатом, которому доверяет клиент (самоподписанный не пройдёт).",
+    "2. Фиксация формата ответа схемой: guided_json (vLLM) или grammar/GBNF",
+    "   (llama.cpp). Какой механизм у вас?",
+    "3. Instruct-модель 7–14B с хорошим русским (например, Qwen2.5-7B/14B-Instruct).",
+    "   Рассуждающие модели (DeepSeek-R1 и дистилляты) не подходят: блок",
+    "   рассуждений перед ответом убивает пропускную способность на потоке писем.",
+    "4. Не меньше 3 одновременных запросов от одного пользователя; цель — до 2 с",
+    "   на письмо (вход ~1500 токенов, выход до 400).",
+    "5. Контекст не меньше 8 тысяч токенов.",
+    "6. Авторизация: без ключа во внутренней сети или статический ключ",
+    "   (Authorization: Bearer).",
+    "7. Тексты писем не сохраняются на хосте модели — ни в журналах запросов,",
+    "   ни в кэшах. Прошу подтвердить письменно.",
+    "",
+    "Прошу сообщить: адрес эндпоинта, имя модели (поле model), квантизацию,",
+    "лимиты одновременных запросов и частоты, способ авторизации, механизм",
+    "фиксации формата, политику журналирования.",
+    "",
+    toModel != null
+      ? `Оценка нагрузки по одному ящику: ~${perDay} писем в день, до модели доходит ` +
+        `~${Math.round(modelShare * 100)} % — около ${toModel} запросов в день на пользователя, ` +
+        "плюс разовый разбор архива."
+      : "Оценка нагрузки появится после разбора ящика (страница «Отчёт о проверке»).",
+    check?.configured
+      ? `Тестовая проверка: ответили ${check.answered} из ${check.total}, JSON ${check.validJson}, ` +
+        `медиана ответа ${Math.round((check.latencyMs?.median ?? 0) / 100) / 10} с` +
+        `${check.reasoningDetected ? ", модель рассуждающая — нужна другая" : ""}.`
+      : "",
+  ].join("\n");
+}
+
 // --- проверки, запускаемые отсюда ----------------------------------------
 
 async function runModelCheck() {
@@ -144,8 +223,16 @@ async function refresh() {
   const me = await myAddresses(browser, cfg.me.aliases);
   const gate = await gateReport({ db, me, cfg: cfg.gate });
   const session = await new TrueConfApi({ cfg: cfg.trueconf, store: db.meta }).session();
+  const rows = await db.messagesInDateRange(Date.now() - 30 * 86400000, null);
+  const built = buildCases(rows, { me, gateCfg: cfg.gate });
   const auto = await collect({
     db, cfg, env: await environment(), gate, me, trueconfSession: session,
+    cases: casesSummary(built.cases, built.cross),
+  });
+  $("llmRequest").textContent = llmRequestText({
+    perDay: Math.round(rows.length / 30),
+    modelShare: gate.decidable ? gate.model / gate.decidable : null,
+    check: await db.meta.get("report:model"),
   });
   lastMarkdown = renderMarkdown({ generatedAt: Date.now(), auto, manual });
   $("preview").textContent = lastMarkdown;
