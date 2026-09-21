@@ -790,6 +790,11 @@ test("замер гейта считает долю снятых писем по
   equal(report.model, 2, "в модель");
   equal(report.removedShare, 0.75, "доля снятых гейтом");
   equal(report.reasons["noise: рассылка"], 6, "разбивка по причинам");
+  equal(report.samples, undefined, "без запроса выборки писем нет");
+
+  const withSample = await gateReport({ db, me: new Set(["me@example.ru"]), cfg: DEFAULTS.gate, sampleSize: 4 });
+  equal(withSample.samples.noise.length, 4, "выборка отсеянных ограничена размером");
+  assert(withSample.samples.noise.every((x) => x.reason === "рассылка" && x.subject), "в выборке причина и тема");
 });
 
 test("свои адреса: личности учётных записей и алиасы из настроек", async () => {
@@ -1125,7 +1130,7 @@ test("отчёт о проверке: метрики по стадиям, руч
   const me = new Set(["me@example.ru"]);
   const auto = await report.collect({
     db, cfg, me,
-    gate: await gateReport({ db, me, cfg: cfg.gate }),
+    gate: await gateReport({ db, me, cfg: cfg.gate, sampleSize: 20 }),
     env: { version: "0.3.0", release: false, buildDate: null, client: "Thunderbird 115.12.2", trialDaysLeft: 80 },
     trueconfSession: { scope: "conferences:read", hasRefresh: true },
   });
@@ -1142,7 +1147,7 @@ test("отчёт о проверке: метрики по стадиям, руч
   assert(md.includes("рассылка"), "причины отсева в отчёте");
   assert(md.includes("Чат конференции"), "итоги проверок TrueConf в отчёте");
   for (const secret of ["secret-model-host", "tc.secret.example", "SUPERSECRET", "cid-777", "TOKEN-XYZ",
-    "me@example.ru", "ivanov@example.ru"]) {
+    "me@example.ru", "ivanov@example.ru", "news@", "\"subject\""]) {
     assert(!md.includes(secret), `в отчёте нет «${secret}»`);
   }
 });

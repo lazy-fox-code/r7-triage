@@ -133,10 +133,11 @@ export async function collect({ db, cfg, env, gate, me, trueconfSession }) {
       passes: scanSummary(await db.checkpoint.list()),
     },
     T2: {
+      // Выборка писем с темами остаётся на экране, в файл не идёт.
       queue: await db.enrichCounts(),
       stats: enrichState?.stats ?? null,
       lastError: enrichState?.error ?? null,
-      gate,
+      gate: gate ? { ...gate, samples: undefined } : null,
       formats: await formatStats(db),
       myAddresses: me?.size ?? null,
       aliases: cfg.me.aliases.length,

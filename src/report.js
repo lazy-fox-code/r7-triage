@@ -13,13 +13,20 @@ import { derive, gate } from "./features.js";
  * @param {object} deps.db   модуль хранилища
  * @param {Set<string>} deps.me свои адреса
  * @param {object} deps.cfg  ветка `gate` из настроек
+ * @param {number} deps.sampleSize сколько случайных отсеянных писем каждого
+ *   класса отложить для просмотра глазами. Выборка показывается только на
+ *   странице состояния и в отчёт о проверке не попадает: в ней темы писем.
  */
-export async function gateReport({ db, me, cfg, batch = 2000, onProgress = () => {} }) {
+export async function gateReport({ db, me, cfg, batch = 2000, sampleSize = 0, onProgress = () => {} }) {
   const out = {
     at: Date.now(),
     total: 0, own: 0, pending: 0, model: 0, noise: 0, info: 0,
     reasons: {},
   };
+  // Равномерная случайная выборка по всему ящику (reservoir sampling):
+  // первые письма ящика не должны вытеснять остальные.
+  const samples = { noise: [], info: [] };
+  const seen = { noise: 0, info: 0 };
 
   await db.pages("messages", batch, (rows) => {
     for (const row of rows) {
@@ -29,6 +36,15 @@ export async function gateReport({ db, me, cfg, batch = 2000, onProgress = () =>
       if (g.label) {
         const k = `${g.label}: ${g.reason}`;
         out.reasons[k] = (out.reasons[k] ?? 0) + 1;
+        if (sampleSize && samples[g.label]) {
+          const n = ++seen[g.label];
+          const item = { date: row.date, from: row.fromId, subject: row.subject, reason: g.reason, quote: g.quote };
+          if (samples[g.label].length < sampleSize) samples[g.label].push(item);
+          else {
+            const j = Math.floor(Math.random() * n);
+            if (j < sampleSize) samples[g.label][j] = item;
+          }
+        }
       }
     }
     onProgress(out.total);
@@ -39,5 +55,6 @@ export async function gateReport({ db, me, cfg, batch = 2000, onProgress = () =>
   const base = out.noise + out.info + out.model;
   out.decidable = base;
   out.removedShare = base ? (out.noise + out.info) / base : null;
+  if (sampleSize) out.samples = samples;
   return out;
 }

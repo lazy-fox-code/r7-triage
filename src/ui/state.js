@@ -29,6 +29,17 @@ function renderEnrich(counts, st) {
     ${st?.error ? `<br><span class="danger">${esc(st.error)}</span>` : ""}`;
 }
 
+/** Выборка отсеянных писем. Только на экране — в отчёт о проверке не идёт. */
+function sampleTable(title, rows) {
+  if (!rows?.length) return "";
+  const body = rows.slice().sort((a, b) => b.date - a.date).map((x) => `<tr>
+    <td>${esc(new Date(x.date).toLocaleDateString("ru-RU"))}</td><td>${esc(x.from)}</td>
+    <td>${esc(x.subject)}</td><td>${esc(x.reason)}</td></tr>`).join("");
+  return `<p>${esc(title)} (${rows.length}). Если среди них есть поручение — отметьте
+    причину в отчёте о проверке: это правило отсева надо чинить.</p>
+    <table><tr><th>Дата</th><th>От кого</th><th>Тема</th><th>Причина</th></tr>${body}</table>`;
+}
+
 function renderGate(r) {
   if (!r) { $("gateOut").textContent = "Ещё не считали."; return; }
   const rows = [
@@ -46,6 +57,8 @@ function renderGate(r) {
   $("gateOut").innerHTML = `
     <table>${rows.map(([k, v]) => `<tr><td>${k}</td><td class="v">${v}</td></tr>`).join("")}</table>
     ${reasons ? `<p>По причинам:</p><table>${reasons}</table>` : ""}
+    ${sampleTable("Для проверки глазами: случайные письма, отсеянные как шум", r.samples?.noise)}
+    ${sampleTable("…и как информирование", r.samples?.info)}
     <p>Посчитано ${when(r.at)}. Доля — от писем, по которым отсев мог решать:
     без своих и недочитанных.</p>`;
 }

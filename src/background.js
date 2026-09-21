@@ -270,7 +270,8 @@ async function status() {
 async function runGateReport() {
   const cfg = await settings.load();
   const me = await myAddresses(browser, cfg.me.aliases);
-  const report = await gateReport({ db, me, cfg: cfg.gate });
+  // Выборка отсеянных — для проверки глазами на странице состояния.
+  const report = await gateReport({ db, me, cfg: cfg.gate, sampleSize: 20 });
   report.myAddresses = me.size;
   await db.meta.set("gate:report", report);
   return report;
