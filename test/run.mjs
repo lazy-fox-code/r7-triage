@@ -48,6 +48,10 @@ const { derive, gate } = await import(`${SRC}features.js`);
 const { gateReport } = await import(`${SRC}report.js`);
 const { myAddresses } = await import(`${SRC}me.js`);
 const tc = await import(`${SRC}trueconf-api.js`);
+const { Semaphore } = await import(`${SRC}llm.js`);
+const { checkModel, SAMPLES } = await import(`${SRC}model-check.js`);
+const { checkDirectory } = await import(`${SRC}directory-check.js`);
+const report = await import(`${SRC}check-report.js`);
 const trial = await import(`${SRC}trial.js`);
 // В релизной сборке дата впечена (см. scripts/build.mjs), и якорь срока — она,
 // а не установка. Тесты срока подстраиваются под текущий якорь.
@@ -1000,6 +1004,147 @@ test("токены TrueConf не попадают в выгрузку состо
 
   const shown = tc.redact(JSON.stringify({ access_token: "abcdefghij", password: "qwerty12" }));
   assert(!shown.includes("efghij") && !shown.includes("ty12"), "в журнале токены и пароли обрезаны");
+});
+
+
+// --- проверки сборки на живом ящике ----------------------------------------
+
+test("ограничитель запросов к модели не пропускает больше заданного", async () => {
+  // Гонка прежнего варианта: слот освободился, ждущий разбужен, но ещё не
+  // проснулся — и в этот промежуток входит новый запрос. Точка входа
+  // подбирается числом переходов очереди микрозадач; прежний ограничитель
+  // пропускал третий запрос при одном переходе.
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+  async function attempt(hops) {
+    const sem = new Semaphore(2);
+    let now = 0;
+    let peak = 0;
+    const gates = [];
+    const task = () => sem.run(async () => {
+      now++;
+      peak = Math.max(peak, now);
+      await new Promise((r) => gates.push(r));
+      now--;
+    });
+    const all = [task(), task(), task()];   // два работают, третий ждёт
+    await tick();
+    gates[0]();                              // первый освобождает слот
+    let p = Promise.resolve();
+    for (let i = 0; i < hops; i++) p = p.then(() => {});
+    all.push(p.then(() => task()));          // новый запрос — в самый момент освобождения
+    for (let k = 0; k < 10; k++) { await tick(); gates.forEach((g) => g()); }
+    await Promise.all(all);
+    return peak;
+  }
+  for (let hops = 0; hops <= 6; hops++) {
+    equal(await attempt(hops), 2, `одновременно не больше двух (переходов очереди: ${hops})`);
+  }
+});
+
+test("проверка модели: эталонные письма, JSON по схеме, рассуждающая модель видна", async () => {
+  const answer = (label, extra = "") => ({
+    choices: [{ message: { content: extra + JSON.stringify({ label, confidence: 0.9, reason: "цитата" }) } }],
+  });
+  const byBody = (body) => SAMPLES.find((s) => body.includes(s.body.slice(0, 30)));
+  const fetch = async (url, init) => {
+    const req = JSON.parse(init.body);
+    const sample = byBody(req.messages[1].content);
+    // Модель ошибается на одном письме с информированием.
+    const label = sample.subject.startsWith("Протокол") ? "task" : sample.expect;
+    return { ok: true, json: async () => answer(label) };
+  };
+  const llm = { ...DEFAULTS.llm, endpoint: "http://model:8000", model: "test-7b" };
+  const r = await checkModel({ llm, fetch });
+  equal(r.total, 6, "писем");
+  equal(r.validJson, 6, "все ответы — JSON");
+  equal(r.schemaOk, 6, "все по схеме");
+  equal(r.correct, 5, "верно 5 из 6");
+  equal(r.reasoningDetected, false, "не рассуждающая");
+
+  const thinking = async () => ({ ok: true, json: async () => answer("task", "<think>долго думаю</think>") });
+  const t = await checkModel({ llm, fetch: thinking });
+  equal(t.reasoningDetected, true, "блок рассуждений замечен");
+  equal(t.validJson, 0, "с блоком рассуждений ответ не разбирается как JSON");
+
+  const none = await checkModel({ llm: DEFAULTS.llm });
+  equal(none.configured, false, "без эндпоинта проверка честно говорит, что модели нет");
+});
+
+test("проверка каталога: книги, поля карточек, в сводке нет ни имён, ни адресов", async () => {
+  const browserStub = {
+    addressBooks: {
+      async list() {
+        return [{ id: "local", name: "Личная", remote: false, readOnly: false },
+          { id: "gal", name: "GAL организации", remote: true, readOnly: true }];
+      },
+    },
+    contacts: {
+      async list(id) { return id === "local" ? [{}, {}, {}] : []; },
+      async quickSearch(q) {
+        if (!q.includeRemote) return [];
+        return [{ properties: {
+          vCard: "BEGIN:VCARD\r\nVERSION:4.0\r\nFN:Иванов Иван\r\nTITLE:Начальник отдела\r\n" +
+            "ORG:ООО Пример;Отдел закупок\r\nEMAIL:ivanov@example.ru\r\nEND:VCARD",
+        } }];
+      },
+    },
+  };
+  const r = await checkDirectory({ browser: browserStub, query: "Иванов" });
+  equal(r.books, 2, "книг");
+  equal(r.remoteBooks, 1, "удалённых");
+  equal(r.localContacts, 3, "карточек в локальных");
+  equal(r.search.remote.results, 1, "найдено в удалённой");
+  equal(r.search.remote.levelFields.title, true, "должность есть");
+  equal(r.search.remote.levelFields.department, true, "подразделение есть");
+  equal(r.search.remote.levelFields.manager, false, "руководителя нет");
+  const text = JSON.stringify(r);
+  assert(!/Иванов|ivanov|Начальник|закупок/.test(text), "в сводке только названия полей");
+});
+
+test("отчёт о проверке: метрики по стадиям, ручные отметки, секретов нет", async () => {
+  const tb = new FakeThunderbird();
+  tb.addAccount("account1", "Ящик", ["me@example.ru"]);
+  const inbox = tb.addFolder("account1", "/INBOX", { name: "Входящие", type: "inbox" });
+  tb.addMessage(inbox, { ...msg("plain", 3) });
+  tb.addMessage(inbox, { ...msg("news", 2), headers: { "List-Id": "<news.example.ru>" } });
+  tb.addMessage(inbox, { ...msg("invite", 1), parts: [
+    { contentType: "text/calendar", partName: "1", headers: {}, body: INVITE, size: 900 },
+  ] });
+  await scanner(tb).run("recent", { since: Date.now() - 30 * 86400000, until: null });
+  await enricher(tb).run();
+
+  const cfg = {
+    ...DEFAULTS,
+    llm: { ...DEFAULTS.llm, endpoint: "http://secret-model-host:8000", model: "qwen-test" },
+    trueconf: { ...DEFAULTS.trueconf, server: "https://tc.secret.example", clientId: "cid-777",
+      clientSecret: "SUPERSECRET" },
+  };
+  await db.meta.set(tc.SECRET_API, { access_token: "TOKEN-XYZ" });
+  await db.meta.set("report:trueconf", { "Чат конференции": { ok: true, status: "200", ms: 120, at: 1 } });
+
+  const me = new Set(["me@example.ru"]);
+  const auto = await report.collect({
+    db, cfg, me,
+    gate: await gateReport({ db, me, cfg: cfg.gate }),
+    env: { version: "0.3.0", release: false, buildDate: null, client: "Thunderbird 115.12.2", trialDaysLeft: 80 },
+    trueconfSession: { scope: "conferences:read", hasRefresh: true },
+  });
+  const md = report.renderMarkdown({
+    generatedAt: Date.now(), auto,
+    manual: { "t2.offline": { status: "pass", note: "включено у всех" }, "t3.connect": { status: "fail", note: "" } },
+  });
+
+  for (const st of report.STAGES) assert(md.includes(`## ${st.id}. ${st.title}`), `раздел ${st.id}`);
+  assert(md.includes("| Хранение всех сообщений офлайн включено во всех учётных записях | пройдено | включено у всех |"),
+    "ручная отметка с комментарием");
+  equal(auto.T2.formats.meetings, 1, "встреча из приглашения посчитана");
+  equal(auto.T2.queue.done, 3, "дочитано писем");
+  assert(md.includes("рассылка"), "причины отсева в отчёте");
+  assert(md.includes("Чат конференции"), "итоги проверок TrueConf в отчёте");
+  for (const secret of ["secret-model-host", "tc.secret.example", "SUPERSECRET", "cid-777", "TOKEN-XYZ",
+    "me@example.ru", "ivanov@example.ru"]) {
+    assert(!md.includes(secret), `в отчёте нет «${secret}»`);
+  }
 });
 
 // --- вспомогательное -----------------------------------------------------

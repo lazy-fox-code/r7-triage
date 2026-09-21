@@ -9,15 +9,28 @@
 import { VERDICT_SCHEMA, buildPrompt } from "./prompts/classify.js";
 
 export class LlmClient {
-  constructor({ endpoint, model, concurrency = 3, timeoutMs = 60000 }) {
+  constructor({ endpoint, model, concurrency = 3, timeoutMs = 60000,
+    fetch = (...a) => globalThis.fetch(...a) }) {
     this.endpoint = endpoint.replace(/\/$/, "");
     this.model = model;
     this.timeoutMs = timeoutMs;
+    this.fetch = fetch;
     this.sem = new Semaphore(concurrency);
   }
 
-  async classify({ subject, from, senderLevel, body, features }) {
+  async classify(letter) {
+    const { verdict, error } = await this.classifyDetailed(letter);
+    if (error) throw error;
+    return verdict;
+  }
+
+  /**
+   * То же с подробностями для проверки модели: сырой ответ, время, признак
+   * рассуждающей модели. Ошибка разбора не бросается, а возвращается.
+   */
+  async classifyDetailed({ subject, from, senderLevel, body, features }) {
     return this.sem.run(async () => {
+      const t0 = Date.now();
       const res = await this.#post({
         model: this.model,
         temperature: 0,
@@ -26,8 +39,15 @@ export class LlmClient {
         // vLLM. Для llama.cpp заменить на { grammar: GBNF }.
         guided_json: VERDICT_SCHEMA,
       });
-      const text = res.choices?.[0]?.message?.content ?? "";
-      return JSON.parse(text);
+      const message = res.choices?.[0]?.message ?? {};
+      const content = message.content ?? "";
+      // Рассуждающие модели выдают блок рассуждений перед ответом — в тексте
+      // или отдельным полем. На батче это недопустимо, поэтому отмечаем.
+      const reasoning = /<think>/i.test(content) || Boolean(message.reasoning_content);
+      let verdict = null;
+      let error = null;
+      try { verdict = JSON.parse(content); } catch (e) { error = e; }
+      return { verdict, error, content, reasoning, ms: Date.now() - t0 };
     });
   }
 
@@ -35,7 +55,7 @@ export class LlmClient {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), this.timeoutMs);
     try {
-      const r = await fetch(`${this.endpoint}/v1/chat/completions`, {
+      const r = await this.fetch(`${this.endpoint}/v1/chat/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -49,12 +69,21 @@ export class LlmClient {
   }
 }
 
-class Semaphore {
-  constructor(n) { this.n = n; this.queue = []; }
+/**
+ * Ограничение одновременных запросов. Освободившийся слот передаётся
+ * ждущему напрямую, без возврата в счётчик. Прежний вариант возвращал слот в
+ * счётчик и будил ждущего: пока тот просыпался, слот успевал занять
+ * пришедший следом, и запросов шло больше, чем задано.
+ */
+export class Semaphore {
+  constructor(n) { this.free = n; this.queue = []; }
   async run(fn) {
-    if (this.n <= 0) await new Promise((r) => this.queue.push(r));
-    this.n--;
+    if (this.free > 0) this.free--;
+    else await new Promise((r) => this.queue.push(r));
     try { return await fn(); }
-    finally { this.n++; this.queue.shift()?.(); }
+    finally {
+      const next = this.queue.shift();
+      if (next) next(); else this.free++;
+    }
   }
 }

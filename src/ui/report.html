@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>R7 Triage — отчёт о проверке</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font: 14px/1.6 system-ui, sans-serif; margin: 0 auto; padding: 24px;
+           max-width: 960px; }
+    h1 { font-size: 18px; }
+    h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em;
+         color: #888; margin-top: 28px; }
+    .muted { color: #888; font-size: 12px; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+    .row input[type=text] { flex: 1 1 240px; padding: 5px; }
+    button { padding: 6px 12px; }
+    table { border-collapse: collapse; width: 100%; }
+    td { padding: 4px 8px 4px 0; vertical-align: top; border-top: 1px solid #8883; }
+    td.check { width: 55%; }
+    td select { width: 140px; }
+    td input { width: 100%; box-sizing: border-box; padding: 4px; }
+    .headline { margin: 4px 0 8px; }
+    pre { background: #8881; padding: 10px; overflow-x: auto; font-size: 12px;
+          max-height: 480px; }
+    .warn { background: #f5a62322; border: 1px solid #f5a62366; padding: 6px 10px;
+            border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>Отчёт о проверке</h1>
+  <p class="muted">
+    Метрики собираются автоматически, ручные проверки отмечаете вы. Отметки
+    сохраняются сразу — страницу можно закрыть и вернуться. Файл отчёта
+    содержит только числа, флаги и названия полей.
+  </p>
+  <p class="warn">Комментарии попадают в файл как есть — не пишите в них
+    адреса, имена и темы писем.</p>
+
+  <div class="row">
+    <button id="refresh">Обновить метрики</button>
+    <button id="save">Сохранить отчёт</button>
+    <span id="status" class="muted"></span>
+  </div>
+
+  <div id="stages"></div>
+
+  <h2>Файл отчёта</h2>
+  <pre id="preview">Нажмите «Обновить метрики».</pre>
+
+  <script type="module" src="report.js"></script>
+</body>
+</html>

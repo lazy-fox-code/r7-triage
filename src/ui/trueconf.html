@@ -26,6 +26,11 @@
     #log { margin-top: 8px; }
     .entry { border-top: 1px solid #8884; padding: 6px 0; }
     .entry .head { font-variant-numeric: tabular-nums; }
+    h3 { font-size: 13px; margin: 18px 0 4px; }
+    #adminRequest { background: #8881; padding: 10px; white-space: pre-wrap; font-size: 12px; }
+    #adminAnswers label { display: grid; grid-template-columns: 340px 1fr; gap: 8px;
+                          align-items: center; margin-bottom: 6px; }
+    #adminAnswers label > span { display: inline; }
     .entry pre { background: #8881; padding: 8px; margin: 4px 0 0; overflow-x: auto;
                  font-size: 12px; max-height: 320px; }
   </style>
@@ -38,6 +43,20 @@
     участники и беседы. Ответы показываются как есть. Сетевых адресатов у
     расширения два — модель и этот сервер.
   </p>
+
+  <h2>Что запросить у администратора TrueConf</h2>
+  <p class="muted">Готовый текст запроса: отправьте его администратору сервера
+    TrueConf. Адрес возврата подставлен автоматически.</p>
+  <pre id="adminRequest"></pre>
+  <div class="row">
+    <button id="copyRequest">Скопировать запрос</button>
+    <button id="saveRequest">Сохранить файлом</button>
+  </div>
+
+  <h3>Ответы администратора</h3>
+  <p class="muted">Заполните по ответу — ответы попадут в отчёт о проверке.
+    ID и секрет приложения вводятся ниже, в «Подключении», и в отчёт не попадают.</p>
+  <div id="adminAnswers"></div>
 
   <h2>Подключение</h2>
   <label><span>Сервер TrueConf</span>

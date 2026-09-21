@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "name": "R7 Triage",
   "description": "Граф переписки, поручения и разбор информирования",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "default_locale": "ru",
   "applications": {
     "gecko": {
@@ -16,6 +16,7 @@
     "messagesRead",
     "messagesUpdate",
     "messagesTags",
+    "addressBooks",
     "identity",
     "storage",
     "unlimitedStorage",

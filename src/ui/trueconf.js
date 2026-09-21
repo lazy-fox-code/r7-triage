@@ -14,6 +14,30 @@ const BODY_LIMIT = 20000;
 
 const entries = [];
 let socket = null;
+const REPORT = "report:trueconf";
+const ADMIN = "report:trueconf-admin";
+
+const SCOPES = [
+  "conferences:read",
+  "conferences.messages:read",
+  "logs.conferences.participants:read",
+  "logs.calls:read",
+  "logs.calls.participants:read",
+];
+
+// Вопросы администратору: ответы идут в отчёт о проверке.
+const ADMIN_QUESTIONS = [
+  ["Версия TrueConf Server", "text"],
+  ["OAuth-приложение создано", "yesno"],
+  ["Типы входа приложения (grant_types)", "text"],
+  ["Путь страницы входа OAuth", "text"],
+  ["Версия API в пути (v4.1 или иная)", "text"],
+  ["Chatbot Connector включён и доступен обычным пользователям", "yesno"],
+  ["Журналы участников (logs.*) доступны обычным пользователям", "yesno"],
+  ["На странице входа есть «Запомнить меня»", "yesno"],
+  ["На входе включена многофакторная аутентификация", "yesno"],
+  ["Примечания администратора", "text"],
+];
 
 function when(ms) {
   return ms ? new Date(ms).toLocaleString("ru-RU") : "—";
@@ -45,6 +69,114 @@ function log(e) {
 }
 
 const fail = (what, e) => log({ method: what, status: "ошибка", error: String(e?.message ?? e) });
+
+// --- итоги для отчёта о проверке ------------------------------------------
+// Только статус, время и число записей — без содержимого ответов.
+
+function countItems(data) {
+  if (Array.isArray(data)) return data.length;
+  if (data && typeof data === "object") {
+    for (const v of Object.values(data)) if (Array.isArray(v)) return v.length;
+    if (typeof data.cnt === "number") return data.cnt;
+  }
+  return null;
+}
+
+async function record(key, { ok, status, ms, note }) {
+  const all = (await db.meta.get(REPORT)) ?? {};
+  all[key] = { ok: Boolean(ok), status: String(status ?? ""), ms: ms ?? null, note: note ?? null, at: Date.now() };
+  await db.meta.set(REPORT, all);
+}
+
+async function recordHttp(key, res) {
+  const n = countItems(res?.data);
+  await record(key, {
+    ok: res?.status >= 200 && res?.status < 300,
+    status: res?.status, ms: res?.ms, note: n == null ? null : `записей: ${n}`,
+  });
+}
+
+// --- запрос администратору ------------------------------------------------
+
+function adminRequestText(redirect) {
+  return [
+    "Запрос администратору TrueConf Server — расширение R7 Triage для Р7-Органайзера",
+    "",
+    "Расширение читает данные TrueConf только от имени вошедшего пользователя:",
+    "чат конференции, фактических участников, беседы. Для этого прошу создать",
+    "OAuth-приложение (панель управления → API → OAuth2):",
+    "",
+    "- Название: R7 Triage",
+    `- Redirect URI: ${redirect}`,
+    "- Типы авторизации (grant_types): только authorization_code и refresh_token.",
+    "  client_credentials, password и остальные НЕ включать: секрет приложения",
+    "  хранится в расширении на рабочих местах, и с client_credentials он давал бы",
+    "  доступ к данным всего сервера без входа пользователя.",
+    `- Права (scopes): ${SCOPES.join(", ")}`,
+    "- Срок жизни токена доступа — по умолчанию (1 час), refresh-токена — не меньше 7 дней.",
+    "",
+    "Прошу сообщить:",
+    "1. client_id и client_secret приложения — защищённым каналом;",
+    "2. адрес сервера, версию TrueConf Server и версию API в пути (/api/v4.1 или иная);",
+    "3. путь страницы входа OAuth на нашем сервере (в документации — /oauth2/authrize);",
+    "4. включён ли Chatbot Connector (/websocket/chat_bot/) и можно ли им пользоваться",
+    "   обычным учётным записям — через него расширение читает беседы;",
+    "5. доступны ли журналы участников конференций (logs.*) обычным пользователям",
+    "   или только администраторам;",
+    "6. есть ли на странице входа «Запомнить меня» — нужно для входа без повторного",
+    "   пароля после входа через плагин TrueConf;",
+    "7. включена ли многофакторная аутентификация.",
+  ].join("\n");
+}
+
+async function renderAdmin() {
+  let redirect = "—";
+  try { redirect = browser.identity.getRedirectURL(); } catch { /* покажем прочерк */ }
+  $("adminRequest").textContent = adminRequestText(redirect);
+
+  const answers = (await db.meta.get(ADMIN)) ?? {};
+  const box = $("adminAnswers");
+  box.textContent = "";
+  for (const [q, kind] of ADMIN_QUESTIONS) {
+    const label = document.createElement("label");
+    const span = document.createElement("span");
+    span.textContent = q;
+    let input;
+    if (kind === "yesno") {
+      input = document.createElement("select");
+      for (const v of ["", "да", "нет", "неизвестно"]) {
+        const o = document.createElement("option");
+        o.value = v;
+        o.textContent = v || "—";
+        input.append(o);
+      }
+    } else {
+      input = document.createElement("input");
+      input.type = "text";
+    }
+    input.value = answers[q] ?? "";
+    input.addEventListener("change", async () => {
+      const all = (await db.meta.get(ADMIN)) ?? {};
+      all[q] = input.value.trim();
+      await db.meta.set(ADMIN, all);
+    });
+    label.append(span, input);
+    box.append(label);
+  }
+}
+
+$("copyRequest").addEventListener("click", () =>
+  navigator.clipboard.writeText($("adminRequest").textContent));
+
+$("saveRequest").addEventListener("click", () => {
+  const blob = new Blob([$("adminRequest").textContent], { type: "text/plain" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "запрос-администратору-trueconf.txt";
+  document.body.append(a);
+  a.click();
+  a.remove();
+});
 
 // --- подключение -----------------------------------------------------------
 
@@ -111,6 +243,8 @@ $("save").addEventListener("click", async () => {
 $("login").addEventListener("click", async () => {
   try {
     const { silent, tokens } = await (await api()).login(browser.identity);
+    await record("вход", { ok: true, status: "ok",
+      note: silent ? "без окна, по сохранённой сессии" : "через окно входа сервера" });
     log({
       method: "ВХОД", status: "ok",
       note: silent ? "без окна — по сохранённой сессии" : "через окно входа сервера",
@@ -118,6 +252,7 @@ $("login").addEventListener("click", async () => {
         refresh_token: Boolean(tokens.refresh_token) },
     });
   } catch (e) {
+    await record("вход", { ok: false, status: "ошибка", note: String(e?.message ?? e).slice(0, 120) });
     fail("ВХОД", e);
   }
   await showSession();
@@ -147,7 +282,12 @@ const QUERIES = {
 
 for (const btn of document.querySelectorAll("button[data-q]")) {
   btn.addEventListener("click", async () => {
-    try { await QUERIES[btn.dataset.q](await api()); } catch (e) { fail(btn.textContent, e); }
+    try {
+      await recordHttp(btn.textContent, await QUERIES[btn.dataset.q](await api()));
+    } catch (e) {
+      await record(btn.textContent, { ok: false, status: "ошибка", note: String(e?.message ?? e).slice(0, 120) });
+      fail(btn.textContent, e);
+    }
   });
 }
 
@@ -169,9 +309,11 @@ async function connectChat(token, how) {
   try {
     const res = await socket.connect(token);
     $("chatStatus").textContent = `подключено (${how})${res?.userId ? ` как ${res.userId}` : ""}`;
+    await record(`беседы: ${how}`, { ok: true, status: "ok" });
   } catch (e) {
     $("chatStatus").textContent = `не подключено (${how})`;
     socket = null;
+    await record(`беседы: ${how}`, { ok: false, status: "ошибка", note: String(e?.message ?? e).slice(0, 120) });
     fail(`ЧАТ: ${how}`, e);
   }
 }
@@ -209,15 +351,23 @@ function needSocket() {
 }
 
 $("chats").addEventListener("click", async () => {
-  try { await needSocket().getChats(); } catch (e) { fail("getChats", e); }
+  try {
+    const r = await needSocket().getChats();
+    await record("беседы: список", { ok: true, status: "ok", note: `бесед: ${countItems(r) ?? "?"}` });
+  } catch (e) {
+    await record("беседы: список", { ok: false, status: "ошибка", note: String(e?.message ?? e).slice(0, 120) });
+    fail("getChats", e);
+  }
 });
 
 $("history").addEventListener("click", async () => {
   try {
     const id = $("chatId").value.trim();
     if (!id) throw new Error("укажите ID беседы");
-    await needSocket().getChatHistory(id);
+    const r = await needSocket().getChatHistory(id);
+    await record("беседы: история", { ok: true, status: "ok", note: `сообщений: ${countItems(r) ?? "?"}` });
   } catch (e) {
+    await record("беседы: история", { ok: false, status: "ошибка", note: String(e?.message ?? e).slice(0, 120) });
     fail("getChatHistory", e);
   }
 });
@@ -234,4 +384,5 @@ $("clearLog").addEventListener("click", () => {
   $("log").textContent = "";
 });
 
+renderAdmin();
 fill();
