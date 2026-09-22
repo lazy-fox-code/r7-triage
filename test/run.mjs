@@ -54,7 +54,7 @@ const { checkDirectory } = await import(`${SRC}directory-check.js`);
 const { DirectoryLookup, levelOf } = await import(`${SRC}directory.js`);
 const report = await import(`${SRC}check-report.js`);
 const { buildCases, diffCases, displaySubject, loadCaseRows, objectId, subjectTemplate } = await import(`${SRC}cases.js`);
-const { SenderProfiler, actionHint } = await import(`${SRC}senders.js`);
+const { SenderProfiler, actionHint, objectKey, statusOf, categoryOf } = await import(`${SRC}senders.js`);
 const trial = await import(`${SRC}trial.js`);
 // В релизной сборке дата впечена (см. scripts/build.mjs), и якорь срока — она,
 // а не установка. Тесты срока подстраиваются под текущий якорь.
@@ -815,13 +815,49 @@ test("замер отсева: заголовки рассылок, профил
   const profiles = await db.getAll("people");
   const sd = profiles.find((p) => p.email === "sd@example.ru");
   equal(sd.kind, "system", "профиль отправителя сохранён в people");
-  assert(sd.why.includes("темы повторяются"), "видно, почему это система");
+  assert(sd.why.includes("темы повторяются") && sd.why.includes("не писали"),
+    "видно, почему это система");
 
   const withSample = await gateReport({ db, me: new Set(["me@example.ru"]), cfg: DEFAULTS.gate, sampleSize: 4 });
   equal(withSample.samples.noise.length, 4, "выборка отсеянных ограничена размером");
   assert(withSample.samples.noise.every((x) => x.reason === "рассылка" && x.subject), "в выборке причина и тема");
-  assert(withSample.samples.info.some((x) => x.quote.includes("ни одного ответа")),
+  assert(withSample.samples.info.some((x) => x.quote.includes("вы этому адресу не писали")),
     "в цитате — на чём основано решение по отправителю");
+});
+
+test("отсев по адресации: копия, письмо не мне и служебные темы", async () => {
+  const me = new Set(["me@example.ru"]);
+  const cfg = DEFAULTS.gate;
+  const row = (extra) => ({
+    id: "m:x@example.ru", date: Date.now(), subject: "Смета на ремонт", fromId: "petrov@example.ru",
+    to: ["petrov2@example.ru"], cc: [], enriched: 1, thread: { parent: null }, ...extra,
+  });
+
+  const cc = gate(derive(row({ to: ["boss@example.ru"], cc: ["me@example.ru"] }), me), cfg);
+  equal(cc.outcome, "info", "я в копии — информирование");
+  equal(cc.reason, "я в копии, а не в адресатах", "причина названа");
+
+  const toMe = gate(derive(row({ to: ["me@example.ru"] }), me), cfg);
+  equal(toMe.outcome, "model", "письмо лично мне решает модель");
+
+  const notMine = gate(derive(row({ to: ["otdel@example.ru"] }), me), cfg);
+  equal(notMine.outcome, "info", "меня нет в адресатах — пришло через список");
+
+  // С тем, с кем есть переписка, правило «я не в адресатах» не срабатывает:
+  // обращение могло прийти и через список рассылки.
+  const known = new Map([["petrov@example.ru", { kind: "person", iWrote: true, dialogThreads: 2, features: [] }]]);
+  const viaList = gate(derive(row({ to: ["otdel@example.ru"] }), me, known), cfg);
+  equal(viaList.outcome, "model", "с собеседником решает модель");
+
+  const auto = gate(derive(row({ to: ["me@example.ru"], subject: "Автоответ: Отсутствую на рабочем месте" }), me), cfg);
+  equal(auto.outcome, "noise", "служебная тема — шум");
+
+  equal(objectKey("Совещание 15.09.2026 перенесено"), null, "дата номером предмета не считается");
+  equal(objectKey("Договор № 15 на согласование").key, objectKey("Справка по договору 15").key,
+    "разные формулировки об одном договоре дают один ключ");
+  equal(statusOf("Инцидент INC001 решён", DEFAULTS.senders.statusWords), "решен", "статус из темы");
+  equal(categoryOf("Инцидент INC001 решён", DEFAULTS.senders.statusWords), "инцидент",
+    "категория — тема без номера и статуса");
 });
 
 test("профиль отправителя: ваши письма отменяют вердикт «система»", async () => {
@@ -1396,11 +1432,53 @@ test("дела: письма системы склеиваются по номе
   const inc = cases.find((c) => c.counts.mail === 3);
   equal(inc.joinedBy.system.object, "INC-0012345", "склеено по номеру инцидента");
   equal(inc.letters[0].why, "первое письмо о INC-0012345", "у первого письма — начало дела");
-  equal(inc.letters[1].why, "«Service Desk»: тот же номер INC-0012345", "почему письмо в деле");
+  equal(inc.letters[1].why, "тот же предмет: INC-0012345", "почему письмо в деле");
   equal(systems.length, 1, "одна система");
   equal(systems[0].cases.length, 2, "оба её дела связаны с ней");
   assert(systems[0].why.includes("noreply"), "сказано, почему отправитель — система");
   assert(inc.people[0].system, "в участниках система помечена");
+});
+
+test("дела: предмет из темы собирает письма разных людей, тема с участником — переписку", async () => {
+  const me = new Set(["me@example.ru"]);
+  const rows = [
+    // Один предмет — разные отправители и разные ветки.
+    letter("sd1", { from: "noreply@sd.example.ru", fromName: "Service Desk",
+      subject: "Инцидент INC0012345 зарегистрирован", ageH: 60 }),
+    letter("p1", { from: "petrov@example.ru", fromName: "Петров",
+      subject: "По инциденту INC-12345 нужна информация", ageH: 50 }),
+    letter("p2", { from: "sidorov@example.ru", fromName: "Сидоров",
+      subject: "FW: Договор № 15 — замечания", ageH: 40, to: ["me@example.ru", "petrov@example.ru"] }),
+    letter("p3", { from: "petrov@example.ru", fromName: "Петров",
+      subject: "Договор 15: итоговая редакция", ageH: 30, to: ["me@example.ru"] }),
+    // Ни References, ни Thread-Index — только тема и общий участник.
+    letter("t1", { from: "petrov@example.ru", subject: "Внедрение учёта заявок", ageH: 20 }),
+    letter("t2", { from: "sidorov@example.ru", subject: "Внедрение учёта заявок", ageH: 10,
+      to: ["me@example.ru", "petrov@example.ru"] }),
+    // Та же тема, но участники не пересекаются и разрыв больше срока.
+    letter("t3", { from: "kuznecov@example.ru", subject: "Внедрение учёта заявок", ageH: 24 * 400 }),
+  ];
+  const { cases } = buildCases(rows, { me, cfg: DEFAULTS.cases });
+  const byObject = cases.find((c) => c.object === "INC-0012345");
+  equal(byObject.counts.mail, 2, "уведомление системы и письмо коллеги об одном инциденте — одно дело");
+  assert(byObject.letters[1].why.includes("INC-12345"), "в плашке назван предмет");
+
+  const contract = cases.find((c) => c.object && c.object.toLowerCase().includes("договор"));
+  equal(contract.counts.mail, 2, "письма о договоре собраны по номеру");
+
+  const rollout = cases.find((c) => c.title === "Внедрение учёта заявок" && c.counts.mail > 1);
+  equal(rollout.counts.mail, 2, "тема и общий участник склеили переписку без References");
+  equal(rollout.letters[1].why, "та же тема и общий участник", "почему письмо в деле");
+  assert(rollout.weight > byObject.weight || rollout.counts.people >= 2, "у переписки с людьми вес выше");
+  assert(cases.some((c) => c.title === "Внедрение учёта заявок" && c.counts.mail === 1),
+    "давнее письмо без общих участников отдельным делом");
+
+  // Объединение руками переживает пересборку.
+  const manual = buildCases(rows, { me, cfg: DEFAULTS.cases,
+    merges: [{ a: "m:t1@example.ru", b: "m:p3@example.ru" }] });
+  const joined = manual.cases.find((c) => c.letters.some((l) => l.id === "m:t1@example.ru"));
+  assert(joined.letters.some((l) => l.id === "m:p3@example.ru"), "дела объединены вручную");
+  assert(joined.joinedBy.manual, "объединение руками названо в деле");
 });
 
 test("дела: система узнаётся по поведению, а обычный отправитель — нет", async () => {

@@ -336,10 +336,10 @@ async function updateBadge() {
   const cfg = await settings.load();
   const me = await myAddresses(browser, cfg.me.aliases);
   const since = Date.now() - cfg.cases.periodDays * DAY;
-  const { rows, systems } = await loadCaseRows(db,
+  const { rows, systems, merges } = await loadCaseRows(db,
     { since, me, cfg: cfg.cases, sendersCfg: cfg.senders });
   const { cases } = buildCases(rows,
-    { me, gateCfg: cfg.gate, cfg: cfg.cases, sendersCfg: cfg.senders, systems, since });
+    { me, gateCfg: cfg.gate, cfg: cfg.cases, sendersCfg: cfg.senders, systems, merges, since });
   const fresh = cases.filter((c) => c.state === "new").length;
   try {
     await browser.spacesToolbar?.updateButton(CASES_BUTTON, {

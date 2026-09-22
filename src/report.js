@@ -11,7 +11,7 @@
 // тому, кто пишет и отвечали ли вы ему, а это считается по всему ящику
 // (`senders.js`). Профили остаются в `people` — их же берёт вкладка «Дела».
 
-import { derive, gate } from "./features.js";
+import { derive, gate, modelSignature } from "./features.js";
 import { profileSenders } from "./senders.js";
 import { DEFAULTS } from "./settings.js";
 
@@ -34,7 +34,13 @@ export async function gateReport({
     at: Date.now(),
     total: 0, own: 0, pending: 0, model: 0, noise: 0, info: 0,
     reasons: {},
+    // Чем оставшиеся письма попали в очередь к модели: по этой гистограмме
+    // видно, какое правило снимет следующую тысячу, а какое ничего не даст.
+    modelReasons: {},
     senders: profiled.counts,
+    // Кандидаты в «свои адреса»: списки рассылки, на которые приходит почта.
+    // Только на экран — в отчёт о проверке адреса не идут.
+    topRecipients: profiled.topRecipients ?? [],
   };
   // Равномерная случайная выборка по всему ящику (reservoir sampling):
   // первые письма ящика не должны вытеснять остальные.
@@ -43,9 +49,14 @@ export async function gateReport({
 
   await db.pages("messages", batch, (rows) => {
     for (const row of rows) {
-      const g = gate(derive(row, me, profiled.profiles), cfg);
+      const f = derive(row, me, profiled.profiles);
+      const g = gate(f, cfg);
       out.total++;
       out[g.outcome]++;
+      if (g.outcome === "model") {
+        const sig = modelSignature(f);
+        out.modelReasons[sig] = (out.modelReasons[sig] ?? 0) + 1;
+      }
       if (g.label) {
         const k = `${g.label}: ${g.reason}`;
         out.reasons[k] = (out.reasons[k] ?? 0) + 1;

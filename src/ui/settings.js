@@ -9,7 +9,9 @@ const SCAN_NUM = ["recentDays", "idleSeconds", "archiveRecheckDays",
   "targetPerWindow", "initialWindowDays", "minWindowDays",
   "maxWindowDays", "overlapDays", "floorYear", "throttleMs"];
 const SCAN_BOOL = ["archiveOnIdle", "autoResume"];
-const CASES_NUM = ["periodDays", "newDays", "historyLimit"];
+const CASES_NUM = ["periodDays", "newDays", "historyLimit", "subjectJoinDays"];
+const CASES_BOOL = ["joinByObject"];
+const GATE_BOOL = ["ccOnlyIsInfo", "unaddressedIsInfo"];
 const SENDERS_NUM = ["minLetters", "broadcastRecipients"];
 const DIR_NUM = ["cacheDays", "pauseMs", "maxPerSession"];
 const DIR_BOOL = ["enabled", "includeRemote"];
@@ -34,6 +36,8 @@ async function fill() {
   $("enrichThrottleMs").value = cfg.enrich.throttleMs;
   $("massCcRecipients").value = cfg.gate.massCcRecipients;
   for (const k of CASES_NUM) $(`cases${up(k)}`).value = cfg.cases[k];
+  for (const k of CASES_BOOL) $(`cases${up(k)}`).checked = cfg.cases[k];
+  for (const k of GATE_BOOL) $(`gate${up(k)}`).checked = cfg.gate[k];
   for (const k of SENDERS_NUM) $(`senders${up(k)}`).value = cfg.senders[k];
   $("sendersSystemSenders").value = cfg.senders.systemSenders.join(", ");
   $("sendersTemplateSharePct").value = Math.round(cfg.senders.templateShare * 100);
@@ -93,13 +97,16 @@ $("save").addEventListener("click", async () => {
     maxSizeBytes: Number($("enrichMaxSizeMb").value) * MB,
     throttleMs: Number($("enrichThrottleMs").value),
   });
-  await settings.save("gate", {
+  const gate = {
     massCcRecipients: Number($("massCcRecipients").value),
     actionWords: list($("gateActionWords").value).map((x) => x.toLowerCase()),
-  });
+  };
+  for (const k of GATE_BOOL) gate[k] = $(`gate${up(k)}`).checked;
+  await settings.save("gate", gate);
 
   const cases = {};
   for (const k of CASES_NUM) cases[k] = Number($(`cases${up(k)}`).value);
+  for (const k of CASES_BOOL) cases[k] = $(`cases${up(k)}`).checked;
   await settings.save("cases", cases);
 
   const senders = {

@@ -26,11 +26,13 @@
 import { derive, gate } from "./features.js";
 import { normalizeSubject } from "./keys.js";
 import { DEFAULTS } from "./settings.js";
-import { SenderProfiler, matchSystemAddress, objectId, subjectTemplate, loadProfiles } from "./senders.js";
+import {
+  SenderProfiler, matchSystemAddress, objectId, objectKey, subjectTemplate, loadProfiles,
+} from "./senders.js";
 
 // Правила «кто такой отправитель» общие с гейтом: система, которая в
 // отсеве считается информированием, и во вкладке «Дела» та же самая.
-export { matchSystemAddress, objectId, subjectTemplate };
+export { matchSystemAddress, objectId, objectKey, subjectTemplate };
 
 const DAY = 86400000;
 
@@ -187,10 +189,36 @@ export async function loadCaseRows(db, {
     }
   }
 
-  return { rows: [...byId.values()], systems, history };
+  const merges = (await db.meta.get("cases:merges")) ?? [];
+  return { rows: [...byId.values()], systems, merges, history };
+}
+
+/** Запомнить объединение дел руками. Ключи писем устойчивы. */
+export async function mergeCases(db, a, b, why = "объединено вручную") {
+  const merges = (await db.meta.get("cases:merges")) ?? [];
+  if (merges.some((m) => (m.a === a && m.b === b) || (m.a === b && m.b === a))) return merges;
+  merges.push({ a, b, at: Date.now(), why });
+  await db.meta.set("cases:merges", merges);
+  return merges;
+}
+
+/** Отменить объединение, в котором участвует письмо. */
+export async function unmergeCase(db, letterId) {
+  const merges = (await db.meta.get("cases:merges")) ?? [];
+  const left = merges.filter((m) => m.a !== letterId && m.b !== letterId);
+  await db.meta.set("cases:merges", left);
+  return left;
 }
 
 // --- сборка ---------------------------------------------------------------------
+
+/** Есть ли у писем общий участник, кроме меня. */
+function sharePeople(a, b, me) {
+  const set = new Set();
+  for (const x of [a.fromId, ...(a.to ?? []), ...(a.cc ?? [])]) if (x && !me.has(x)) set.add(x);
+  for (const x of [b.fromId, ...(b.to ?? []), ...(b.cc ?? [])]) if (x && !me.has(x) && set.has(x)) return true;
+  return false;
+}
 
 /** Почему письмо в деле — для плашки «почему в деле». */
 function whyOf(row, ctx) {
@@ -201,6 +229,8 @@ function whyOf(row, ctx) {
     // Родитель у письма есть, а в деле его нет: начало ветки удалено, лежит
     // за пределами поднятой истории или ещё не разобрано.
     if (row.thread?.parent) return "самое раннее найденное письмо ветки";
+    const first = ctx.objKeys.get(row.id);
+    if (first && ctx.sharedObjects.has(first.key)) return `первое письмо о ${first.label}`;
     if (shared) return sys.object ? `первое письмо о ${sys.object}` : "первое письмо серии";
     return "начало ветки";
   }
@@ -213,10 +243,14 @@ function whyOf(row, ctx) {
   }
   if (row.thread?.root || row.thread?.parent) return "та же ветка";
   if (row.thread?.index) return "та же беседа Outlook";
+  const obj = ctx.objKeys.get(row.id);
+  if (obj && ctx.sharedObjects.has(obj.key)) return `тот же предмет: ${obj.label}`;
   if (shared) {
     const name = ctx.systemName(row.fromId);
     return sys.object ? `${name}: тот же номер ${sys.object}` : `${name}: та же тема письма системы`;
   }
+  if (ctx.subjectJoined.has(row.id)) return "та же тема и общий участник";
+  if (ctx.merged.has(row.id)) return "дела объединены вручную";
   return "та же ветка";
 }
 
@@ -236,7 +270,7 @@ function whyOf(row, ctx) {
  */
 export function buildCases(rows, {
   me = new Set(), gateCfg = DEFAULTS.gate, cfg = DEFAULTS.cases,
-  sendersCfg = DEFAULTS.senders, systems = null, since = null, now = Date.now(),
+  sendersCfg = DEFAULTS.senders, systems = null, merges = [], since = null, now = Date.now(),
 } = {}) {
   const newDays = cfg.newDays ?? 7;
   const sys = systems ?? detectSystems(rows, me, sendersCfg);
@@ -257,6 +291,7 @@ export function buildCases(rows, {
   }
 
   const uf = new UnionFind();
+  const objKeys = new Map();
   for (const { row } of kept) {
     uf.find(row.id);
     if (row.threadId) uf.union(row.id, row.threadId);
@@ -265,6 +300,53 @@ export function buildCases(rows, {
     for (const c of row.calendar ?? []) if (c.uid) uf.union(row.id, `cal:${c.uid}`);
     const key = sysKeys.get(row.id);
     if (key) uf.union(row.id, key.key);
+
+    // Предмет переписки из темы: «Договор № 15», INC-0012345. Работает и
+    // между разными отправителями — уведомление системы об инциденте и
+    // письмо коллеги о нём же оказываются в одном деле.
+    if (cfg.joinByObject) {
+      const obj = objectKey(row.subject);
+      if (obj) { objKeys.set(row.id, obj); uf.union(row.id, `obj:${obj.key}`); }
+    }
+  }
+
+  // Одинаковая тема при общем участнике — переписка, у которой не дошли
+  // References: Thread-Index в этой почте пуст, и без этого правила такие
+  // письма остаются каждое своим делом.
+  const subjectJoined = new Set();
+  const joinDays = cfg.subjectJoinDays ?? 0;
+  if (joinDays > 0) {
+    const buckets = new Map();
+    for (const { row } of kept) {
+      const key = normalizeSubject(row.subject);
+      // Короткая тема («отчёт», «вопрос») общим предметом не считается.
+      if (key.length < 8) continue;
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(row);
+    }
+    for (const rows of buckets.values()) {
+      if (rows.length < 2) continue;
+      rows.sort((a, b) => a.date - b.date);
+      for (let i = 1; i < rows.length; i++) {
+        const prev = rows[i - 1];
+        const row = rows[i];
+        if (row.date - prev.date > joinDays * DAY) continue;
+        if (!sharePeople(prev, row, me)) continue;
+        uf.union(prev.id, row.id);
+        subjectJoined.add(row.id);
+      }
+    }
+  }
+
+  // Объединения руками: пользователь свёл два дела, и это решение переживает
+  // пересборку. Ключи писем устойчивы, поэтому связь не рассыпается, когда
+  // дело прирастает письмами.
+  const merged = new Set();
+  for (const m of merges) {
+    if (!uf.p.has(m.a) || !uf.p.has(m.b)) continue;
+    uf.union(m.a, m.b);
+    merged.add(m.a);
+    merged.add(m.b);
   }
 
   const groups = new Map();
@@ -288,14 +370,21 @@ export function buildCases(rows, {
     // Ключи, которые встретились больше одного раза, — ими дело склеено.
     const uidCount = new Map();
     const sysCount = new Map();
+    const objCount = new Map();
     for (const { row } of items) {
       for (const c of row.calendar ?? []) uidCount.set(c.uid, (uidCount.get(c.uid) ?? 0) + 1);
       const key = sysKeys.get(row.id);
       if (key) sysCount.set(key.key, (sysCount.get(key.key) ?? 0) + 1);
+      const obj = objKeys.get(row.id);
+      if (obj) objCount.set(obj.key, (objCount.get(obj.key) ?? 0) + 1);
     }
     const sharedUids = new Set([...uidCount].filter(([, n]) => n > 1).map(([u]) => u));
     const sharedSys = new Set([...sysCount].filter(([, n]) => n > 1).map(([k]) => k));
-    const ctx = { startId: start.id, sharedUids, sharedSys, sysKeys, systemName };
+    const sharedObjects = new Set([...objCount].filter(([, n]) => n > 1).map(([k]) => k));
+    const ctx = {
+      startId: start.id, sharedUids, sharedSys, sharedObjects,
+      sysKeys, objKeys, subjectJoined, merged, systemName,
+    };
 
     const meetings = new Map();
     const tasks = new Map();
@@ -378,10 +467,18 @@ export function buildCases(rows, {
       systems: [...senders],
       files,
       people: [...people.values()].sort((a, b) => b.wrote - a.wrote || b.letters - a.letters),
+      // Предмет дела, если он назван в темах: номер договора, инцидента,
+      // заявки. По нему дело узнаётся человеком лучше, чем по теме письма.
+      object: [...items.map(({ row }) => objKeys.get(row.id))]
+        .find((o) => o && sharedObjects.has(o.key))?.label
+        ?? (objKeys.get(start.id)?.label ?? null),
       joinedBy: {
         thread: items.some(({ row }) => row.thread?.root || row.thread?.parent),
         outlook: items.some(({ row }) => row.thread?.index),
         meeting: sharedUids.size > 0,
+        object: sharedObjects.size > 0,
+        subject: items.some(({ row }) => subjectJoined.has(row.id)),
+        manual: items.some(({ row }) => merged.has(row.id)),
         system: joinedBySystem
           ? { email: joinedBySystem.email, name: sys.get(joinedBySystem.email)?.name || joinedBySystem.email,
             object: joinedBySystem.object }
@@ -392,6 +489,17 @@ export function buildCases(rows, {
       mail: letters.length, meet: c.meetings.length, task: c.tasks.length,
       conf: c.conferences.length, files: files.length, people: c.people.length,
     };
+    // Дело системы: писали в нём только системы. Такие дела в списке и на
+    // графе сворачиваются под свою систему — иначе сотня уведомлений
+    // закрывает собой переписку.
+    const writers = [...new Set(letters.filter((l) => !l.mine).map((l) => l.fromId))];
+    c.systemOwner = writers.length > 0 && writers.every((w) => sys.has(w)) ? writers[0] : null;
+    // Вес дела: по нему в списке поднимаются проекты и внедрения, а не
+    // однописьменные уведомления. Письма, участники, вложения и срок жизни.
+    c.weight = Math.round(
+      letters.length * 2 + c.people.length * 3 + files.length
+      + Math.min(30, (c.lastAt - c.firstAt) / DAY) / 2
+      + (fromMe > 0 ? 6 : 0));
     cases.push(c);
     for (const conf of c.conferences) {
       if (!byConference.has(conf.key)) byConference.set(conf.key, []);

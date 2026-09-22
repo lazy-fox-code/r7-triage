@@ -9,7 +9,7 @@
 
 import { normalizeAddress } from "./keys.js";
 import { ENRICH } from "./db.js";
-import { actionHint } from "./senders.js";
+import { actionHint, statusOf } from "./senders.js";
 
 export { normalizeAddress as normalize };
 
@@ -79,6 +79,25 @@ const decided = (outcome, confidence, reason, features, quote) =>
  * @param {object} f  признаки из derive
  * @param {object} cfg ветка `gate` из настроек
  */
+/**
+ * Чем письмо оказалось в очереди к модели — подпись из дешёвых признаков.
+ * Замер складывает такие подписи в гистограмму: по ней видно, где лежит
+ * масса писем, которые отсев не снял, и какое правило писать следующим.
+ */
+export function modelSignature(f) {
+  const addressing = f.inTo
+    ? (f.isNamedRecipient ? "лично в «Кому»" : "в «Кому» среди многих")
+    : f.inCc ? "в копии" : "не в адресатах";
+  const sender = f.sender
+    ? (f.sender.kind === "person"
+      ? (f.sender.iWrote || f.sender.dialogThreads > 0 ? "переписка есть" : "переписки нет")
+      : f.sender.kind)
+    : "отправитель не разобран";
+  const thread = f.isThreadStart == null ? "ветка неизвестна"
+    : f.isThreadStart ? "начало ветки" : "ответ в ветке";
+  return `${addressing} · ${sender} · ${thread}`;
+}
+
 export function gate(f, cfg) {
   if (f.fromMe) return { outcome: "own", reason: "моё письмо" };
 
@@ -117,6 +136,13 @@ export function gate(f, cfg) {
     return decided("info", 0.95, "отмена встречи", ["calendar-cancel"], "METHOD:CANCEL");
   }
 
+  // Тема служебного письма, в котором нет содержания.
+  const noise = statusOf(f.subject, cfg.noiseSubjects);
+  if (noise) {
+    return decided("noise", 0.9, "служебное письмо", ["subject-service"],
+      `Тема: ${f.subject}`);
+  }
+
   if (f.inCc && !f.inTo && f.recipientCount > cfg.massCcRecipients) {
     return decided("info", 0.8, "копия массовой рассылки", ["cc-only", "recipient-count"],
       `Копия, получателей: ${f.recipientCount}`);
@@ -140,6 +166,20 @@ export function gate(f, cfg) {
     return decided("info", s.kind === "system" ? 0.85 : 0.8, noun,
       ["sender-kind", ...(s.features ?? [])],
       `Тема: ${f.subject || "(без темы)"} · отправитель: ${s.why}`);
+  }
+
+  // Адресация. Обращение — это «Кому»: в копии сообщают, а не просят. Копия
+  // на весь отдел разобрана выше, здесь — любая копия.
+  if (cfg.ccOnlyIsInfo && f.inCc && !f.inTo) {
+    return decided("info", 0.7, "я в копии, а не в адресатах", ["cc-only"],
+      `Копия, получателей: ${f.recipientCount}`);
+  }
+  // Меня нет ни в «Кому», ни в копии: письмо пришло на список рассылки или
+  // в общий ящик. Если переписка с отправителем есть — решает модель: это
+  // может быть обращение, просто через список.
+  if (cfg.unaddressedIsInfo && !f.inTo && !f.inCc && !(s?.iWrote || s?.dialogThreads > 0)) {
+    return decided("info", 0.65, "я не в адресатах письма", ["not-addressed"],
+      `Получателей: ${f.recipientCount}, ваших адресов среди них нет`);
   }
 
   if (f.enriched === ENRICH.PENDING) {

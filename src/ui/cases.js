@@ -18,7 +18,8 @@
 import * as db from "../db.js";
 import * as settings from "../settings.js";
 import { myAddresses } from "../me.js";
-import { buildCases, diffCases, displaySubject, loadCaseRows } from "../cases.js";
+import { buildCases, diffCases, displaySubject, loadCaseRows, mergeCases } from "../cases.js";
+import { objectId, statusOf, categoryOf } from "../senders.js";
 import { CaseGraph, STATE_NAMES, plural, initials } from "./cases-graph.js";
 import { DirectoryLookup } from "../directory.js";
 import { TrueConfApi } from "../trueconf-api.js";
@@ -37,6 +38,12 @@ const S = {
   history: { added: 0, truncated: false },
   historyWarned: false,
   since: null,
+  // Системы свёрнуты, пока их не развернули: сотня уведомлений не должна
+  // закрывать собой переписку. Скрытые — в настройках, они переживают
+  // перезапуск.
+  expandedSystems: new Set(),
+  selectedSystem: null,
+  sysLimit: 200,
   byId: new Map(),
   selected: null,
   filter: "all",
@@ -98,10 +105,12 @@ const STATE_COLOR = { new: "var(--st-new)", branch: "var(--st-stale)" };
 async function rebuild({ initial = false } = {}) {
   const since = Date.now() - S.cfg.cases.periodDays * DAY;
   S.since = since;
-  const { rows, systems: found, history } = await loadCaseRows(db,
+  const { rows, systems: found, merges, history } = await loadCaseRows(db,
     { since, me: S.me, cfg: S.cfg.cases, sendersCfg: S.cfg.senders });
-  const { cases, cross, systems } = buildCases(rows,
-    { me: S.me, gateCfg: S.cfg.gate, cfg: S.cfg.cases, sendersCfg: S.cfg.senders, systems: found, since });
+  const { cases, cross, systems } = buildCases(rows, {
+    me: S.me, gateCfg: S.cfg.gate, cfg: S.cfg.cases, sendersCfg: S.cfg.senders,
+    systems: found, merges, since,
+  });
   const events = S.built ? diffCases(S.cases, cases) : [];
   S.cases = cases;
   S.cross = cross;
@@ -135,18 +144,44 @@ async function rebuild({ initial = false } = {}) {
   for (const id of new Set(events.map((e) => e.caseId))) graph.pulse(id);
 }
 
+const hiddenSystem = (email) => S.cfg.cases.hiddenSystems.includes(email);
+const bigCase = (c) => c.counts.mail >= 3 && c.counts.people >= 2;
+
 function visibleCases() {
   const q = S.query.trim().toLowerCase();
   return S.cases.filter((c) => {
+    const owner = c.systemOwner;
+    if (owner && hiddenSystem(owner)) return false;
+    // Дела свёрнутой системы в общем списке не показываются — они под её
+    // строкой. Поиск свёрнутость отменяет: искать нужно везде.
+    if (owner && !q && !S.expandedSystems.has(owner)) return false;
     if (S.filter === "new" && c.state !== "new") return false;
+    if (S.filter === "big" && !bigCase(c)) return false;
     if (S.filter === "meet" && !c.counts.meet) return false;
     if (S.filter === "conf" && !c.counts.conf) return false;
     if (!q) return true;
-    const hay = [c.title, ...c.people.map((p) => `${p.name} ${p.email}`),
+    const hay = [c.title, c.object ?? "", ...c.people.map((p) => `${p.name} ${p.email}`),
       ...c.conferences.map((f) => `${f.id} ${f.topic ?? ""}`), ...c.meetings.map((m) => m.summary)]
       .join(" ").toLowerCase();
     return hay.includes(q);
-  });
+  }).sort((a, b) => (S.filter === "big" ? b.weight - a.weight : b.lastAt - a.lastAt));
+}
+
+/** Системы с их делами — строки списка и узлы графа. */
+function visibleSystems() {
+  return S.systems
+    .map((s) => {
+      const cases = s.cases.map((id) => S.byId.get(id)).filter(Boolean);
+      return {
+        ...s, cases: cases.map((c) => c.id),
+        letters: cases.reduce((n, c) => n + c.counts.mail, 0),
+        unread: cases.reduce((n, c) => n + c.unread, 0),
+        hidden: hiddenSystem(s.email),
+        collapsed: !S.expandedSystems.has(s.email),
+      };
+    })
+    .filter((s) => s.cases.length)
+    .sort((a, b) => b.letters - a.letters);
 }
 
 function scheduleRebuild() {
@@ -167,19 +202,22 @@ function render({ initial = false } = {}) {
   renderCard();
   renderOverlay(vis.length, shown.length);
   graph.setData({
-    cases: shown, cross: S.cross, systems: S.systems, selected: S.selected, scope: S.scope,
+    cases: shown, cross: S.cross, systems: visibleSystems().filter((x) => !x.hidden),
+    selected: S.selected, selectedSystem: S.selectedSystem, scope: S.scope,
     allPeople: S.allPeople, expanded: S.expanded,
   }, { initial });
 }
 
 function renderChips() {
+  const own = S.cases.filter((c) => !c.systemOwner || !hiddenSystem(c.systemOwner));
   const counts = {
-    all: S.cases.length,
-    new: S.cases.filter((c) => c.state === "new").length,
-    meet: S.cases.filter((c) => c.counts.meet).length,
-    conf: S.cases.filter((c) => c.counts.conf).length,
+    all: own.length,
+    new: own.filter((c) => c.state === "new").length,
+    big: own.filter(bigCase).length,
+    meet: own.filter((c) => c.counts.meet).length,
+    conf: own.filter((c) => c.counts.conf).length,
   };
-  const names = { all: "Все", new: "Новое", meet: "Со встречами", conf: "С конференциями" };
+  const names = { all: "Все", new: "Новое", big: "Крупные", meet: "Со встречами", conf: "С конференциями" };
   const box = $("chips");
   box.textContent = "";
   for (const k of Object.keys(names)) {
@@ -209,19 +247,59 @@ function srcCount(id, n, label) {
   return n ? h("span", { class: "srccount", title: label }, icon(id, 12), num(n)) : null;
 }
 
+/** Строка системы: свёрнутые дела, таблица и «скрыть». */
+function systemRow(sys) {
+  const row = h("div", { class: "sysrow", "data-open": String(!sys.collapsed) });
+  row.append(h("button", {
+    type: "button", class: "sys-toggle", title: sys.collapsed ? "Показать дела" : "Свернуть дела",
+    "aria-expanded": String(!sys.collapsed),
+    onclick: () => {
+      if (S.expandedSystems.has(sys.email)) S.expandedSystems.delete(sys.email);
+      else S.expandedSystems.add(sys.email);
+      render();
+    },
+  }, sys.collapsed ? "▸" : "▾"));
+  row.append(h("button", {
+    type: "button", class: "sys-name", title: "Таблица писем системы",
+    onclick: () => selectSystem(sys.email),
+  }, icon("i-branch", 12), h("span", { text: sys.name }),
+  h("span", { class: "num", text: `${num(sys.cases.length)} дел · ${num(sys.letters)} писем` }),
+  sys.unread ? h("span", { class: "new-tag", text: `новое · ${sys.unread}` }) : null));
+  row.append(h("button", {
+    type: "button", class: "more", title: "Убрать дела системы из списка и графа",
+    onclick: () => hideSystem(sys.email, true), text: "скрыть",
+  }));
+  return row;
+}
+
 function renderList(shown) {
   const box = $("list");
   box.textContent = "";
+  const systems = visibleSystems();
+  const hidden = systems.filter((s) => s.hidden);
+  if (systems.some((s) => !s.hidden)) {
+    box.append(h("div", { class: "grp" }, "Системы",
+      h("span", { class: "num", style: "color: var(--c-text-2);", text: num(systems.filter((s) => !s.hidden).length) })));
+    for (const sys of systems) if (!sys.hidden) box.append(systemRow(sys));
+  }
+  if (hidden.length) {
+    box.append(h("div", { class: "hidden-note" },
+      `Скрыто систем: ${hidden.length}. `,
+      ...hidden.map((s) => h("button", {
+        type: "button", class: "more", onclick: () => hideSystem(s.email, false),
+        text: `вернуть «${s.name}»`,
+      }))));
+  }
   if (!shown.length) {
     box.append(h("div", { class: "empty", text: S.cases.length
-      ? "Ничего не найдено. Сбросьте фильтр или поиск."
+      ? "Ничего не найдено. Сбросьте фильтр или поиск — или разверните систему."
       : "Дел пока нет: письма ещё разбираются. Вкладку можно закрыть — сбор продолжится." }));
     return;
   }
-  const groups = [
-    ["Новое", shown.filter((c) => c.state === "new")],
-    ["Ветки", shown.filter((c) => c.state !== "new")],
-  ];
+  const groups = S.filter === "big"
+    ? [["Крупные дела", shown]]
+    : [["Новое", shown.filter((c) => c.state === "new")],
+      ["Ветки", shown.filter((c) => c.state !== "new")]];
   for (const [name, items] of groups) {
     if (!items.length) continue;
     box.append(h("div", { class: "grp" }, name, h("span", { class: "num", style: "color: var(--c-text-2);", text: num(items.length) })));
@@ -230,7 +308,9 @@ function renderList(shown) {
         type: "button", class: "row", role: "option", "data-id": c.id,
         "aria-selected": String(S.selected === c.id), onclick: () => select(c.id),
       },
-      h("span", { class: "row-top" }, statePill(c.state), h("span", { class: "row-title", text: c.title })),
+      h("span", { class: "row-top" }, statePill(c.state),
+        h("span", { class: "row-title", text: c.title }),
+        c.object ? h("span", { class: "why", text: c.object }) : null),
       h("span", { class: "row-meta" },
         c.state === "new" ? h("span", { class: "new-tag", text: `новое · ${c.unread}` }) : null,
         srcCount("i-mail", c.counts.mail, "писем"),
@@ -316,8 +396,124 @@ function timelineSection(tl, sec) {
 
 const isEarly = (it) => S.since != null && it.at < S.since;
 
+/**
+ * Строки таблицы системы: по одной на письмо. Дата, категория (тема-бланк
+ * без номера и статуса), запрос, номер объекта и статус берутся из темы.
+ * Ответственный и срок остаются пустыми до модели — выдумывать их нельзя.
+ */
+function systemTable(sys) {
+  const rows = [];
+  for (const id of sys.cases) {
+    const c = S.byId.get(id);
+    if (!c) continue;
+    for (const l of c.letters) {
+      if (l.mine) continue;
+      rows.push({
+        date: l.date,
+        category: categoryOf(l.subject, S.cfg.senders.statusWords) || "—",
+        request: displaySubject(l.subject),
+        owner: "",
+        due: "",
+        number: objectId(l.subject) ?? c.object ?? "",
+        status: statusOf(l.subject, S.cfg.senders.statusWords) || "",
+        caseId: c.id,
+        letterId: l.id,
+      });
+    }
+  }
+  return rows.sort((a, b) => a.date - b.date);
+}
+
+const CSV_HEAD = ["Дата", "Категория", "Запрос", "Ответственный", "Срок", "Номер", "Статус"];
+
+function downloadCsv(name, rows) {
+  const cell = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const lines = [CSV_HEAD.map(cell).join(";")];
+  for (const r of rows) {
+    lines.push([new Date(r.date).toLocaleString("ru-RU"), r.category, r.request,
+      r.owner, r.due, r.number, r.status].map(cell).join(";"));
+  }
+  // BOM — чтобы кириллица открылась в Excel без плясок с кодировкой.
+  const blob = new Blob([`\uFEFF${lines.join("\r\n")}\r\n`], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = h("a", { href: url, download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
+function renderSystemCard(sys) {
+  const card = $("card");
+  card.hidden = false;
+  card.textContent = "";
+  const rows = systemTable(sys);
+
+  card.append(h("div", { class: "card-hd" },
+    h("h2", { text: sys.name }),
+    h("span", { class: "state", style: "background: var(--c-surface-3);" }, "Система"),
+    h("div", { class: "card-meta", text: `${num(sys.cases.length)} ${plural(sys.cases.length, ["дело", "дела", "дел"])} · ` +
+      `${num(rows.length)} ${plural(rows.length, ["письмо", "письма", "писем"])}` +
+      (rows.length ? ` · ${day(rows[0].date)} — ${day(rows[rows.length - 1].date)}` : "") }),
+    h("button", { type: "button", class: "icon-btn card-close", "aria-label": "Закрыть карточку",
+      onclick: () => selectSystem(null), text: "×" })));
+
+  const scroll = h("div", { class: "card-scroll" });
+  scroll.append(h("section", { class: "sec" },
+    h("h3", {}, icon("i-branch", 12), " Почему это система"),
+    whyChip(sys.why, "src"),
+    h("p", { style: "margin: 8px 0 0; font-size: var(--fs-xs); color: var(--c-text-2);",
+      text: "Её письма собираются в дела по номеру объекта и не смешиваются с перепиской. " +
+        "Ответственный и срок появятся, когда будет подключена модель: из темы их не достать." })));
+
+  const sec = h("section", { class: "sec" },
+    h("h3", { text: `Хронология — ${num(rows.length)} ${plural(rows.length, ["запись", "записи", "записей"])}` }));
+  const table = h("table", { class: "systab" });
+  table.append(h("tr", {}, ...CSV_HEAD.map((t) => h("th", { text: t }))));
+  for (const r of rows.slice(0, S.sysLimit)) {
+    table.append(h("tr", {},
+      h("td", { text: day(r.date) }),
+      h("td", { text: r.category }),
+      h("td", {}, h("button", { type: "button", class: "link", title: "Открыть письмо",
+        onclick: () => openLetter(r.letterId), text: r.request })),
+      h("td", { text: r.owner || "—" }),
+      h("td", { text: r.due || "—" }),
+      h("td", {}, r.number
+        ? h("button", { type: "button", class: "link", title: "Открыть дело",
+          onclick: () => { selectSystem(null); select(r.caseId); }, text: r.number })
+        : "—"),
+      h("td", { text: r.status || "—" })));
+  }
+  sec.append(table);
+  if (rows.length > S.sysLimit) {
+    sec.append(h("button", { type: "button", class: "more",
+      text: `Показать ещё ${Math.min(200, rows.length - S.sysLimit)}`,
+      onclick: () => { S.sysLimit += 200; renderCard(); } }));
+  }
+  scroll.append(sec);
+  card.append(scroll);
+
+  card.append(h("div", { class: "actions" },
+    h("button", { type: "button", class: "btn", "data-kind": "primary",
+      onclick: () => downloadCsv(`${sys.email.replace(/[^\w.-]+/g, "_")}.csv`, rows) },
+    "Скачать таблицу (CSV)"),
+    h("button", { type: "button", class: "btn",
+      onclick: () => hideSystem(sys.email, !hiddenSystem(sys.email)) },
+    hiddenSystem(sys.email) ? "Показать в списке" : "Скрыть из списка"),
+    h("button", { type: "button", class: "btn", onclick: () => {
+      if (S.expandedSystems.has(sys.email)) S.expandedSystems.delete(sys.email);
+      else S.expandedSystems.add(sys.email);
+      render();
+    } }, S.expandedSystems.has(sys.email) ? "Свернуть дела" : "Показать дела в списке")));
+}
+
 function renderCard() {
   const card = $("card");
+  if (S.selectedSystem) {
+    const sys = visibleSystems().find((x) => x.email === S.selectedSystem);
+    if (sys) { renderSystemCard(sys); return; }
+    S.selectedSystem = null;
+  }
   const c = S.selected ? S.byId.get(S.selected) : null;
   card.hidden = !c;
   card.textContent = "";
@@ -355,8 +551,8 @@ function renderCard() {
     sys ? h("div", { style: "margin-top: 8px; font-size: var(--fs-xs); color: var(--c-text-2);" },
       `Система «${sys.name}» — ${sys.why}. `,
       sys.cases.length > 1
-        ? h("button", { type: "button", class: "more", onclick: () => filterBySystem(sys),
-          text: `Другие дела этой системы: ${sys.cases.length - 1}` })
+        ? h("button", { type: "button", class: "more", onclick: () => selectSystem(sys.email),
+          text: `Все дела этой системы: ${sys.cases.length}` })
         : null) : null,
     linked.length ? h("div", { style: "margin-top: 8px; font-size: var(--fs-xs); color: var(--c-text-2);" },
       "Связано с: ", ...linked.map((x, i) => h("span", {},
@@ -541,6 +737,7 @@ function select(id) {
   // Список перерисовывается целиком — фокус возвращаем на выбранную строку,
   // чтобы стрелки продолжали работать.
   const listHadFocus = $("list").contains(document.activeElement);
+  if (id) S.selectedSystem = null;
   S.selected = id;
   S.expanded = new Set();
   S.tlLimit = TL_STEP;
@@ -572,12 +769,40 @@ async function showLevel(person, el) {
   } catch { /* каталог недоступен — строки просто не будет */ }
 }
 
-/** Показать в списке только дела одной системы: поиск по её адресу. */
-function filterBySystem(sys) {
-  S.query = sys.email;
-  S.filter = "all";
-  $("q").value = sys.email;
+/** Открыть карточку системы: таблица её писем. */
+function selectSystem(email) {
+  S.selectedSystem = email;
+  S.sysLimit = 200;
+  if (email) S.selected = null;
   render();
+}
+
+/** Убрать дела системы из списка и графа (или вернуть). Решение помнится. */
+async function hideSystem(email, hide) {
+  const set = new Set(S.cfg.cases.hiddenSystems);
+  if (hide) set.add(email); else set.delete(email);
+  S.cfg.cases.hiddenSystems = [...set];
+  await settings.save("cases", { hiddenSystems: S.cfg.cases.hiddenSystems });
+  pushEvent({ icon: "i-cases", what: hide ? "Система скрыта" : "Система возвращена в список",
+    why: "настройки → Дела → скрытые системы" });
+  render();
+}
+
+/**
+ * Объединить два дела перетаскиванием на графе. Связь запоминается по
+ * ключам первых писем — они устойчивы, поэтому объединение переживает и
+ * пересборку, и перезапуск клиента.
+ */
+async function mergeManually(aId, bId) {
+  const a = S.byId.get(aId);
+  const b = S.byId.get(bId);
+  if (!a || !b || a === b) return;
+  if (!confirm(`Объединить дела «${a.title}» и «${b.title}»?`)) return;
+  await mergeCases(db, a.letters[0].id, b.letters[0].id);
+  pushEvent({ icon: "i-cases", what: `Дела объединены: «${a.title}» и «${b.title}»`,
+    why: "объединено вручную" });
+  await rebuild();
+  select(S.cases.find((c) => c.letters.some((l) => l.id === a.letters[0].id))?.id ?? null);
 }
 
 const openLetter = (id) => send("letter.open", { id });
@@ -611,10 +836,8 @@ async function poll() {
 
 const graph = new CaseGraph($("graph"), {
   onSelect: (id) => select(id),
-  onPickSystem: (email) => {
-    const sys = S.systems.find((s) => s.email === email);
-    if (sys) filterBySystem(sys);
-  },
+  onPickSystem: (email) => selectSystem(email),
+  onMerge: (a, b) => mergeManually(a, b),
   onTip: (tip) => {
     const el = $("tip");
     el.hidden = !tip;

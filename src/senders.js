@@ -80,6 +80,42 @@ const OBJECT_WORD = /(?<!\p{L})(?:заявк|инцидент|обращени|�
 const OBJECT_CODE = /(?<![\p{L}\d])(\p{L}{2,10})-?(\d{3,})(?![\p{L}\d])/u;
 const OBJECT_SIGN = /(?:№|#)\s?(\d{3,})(?!\d)/u;
 
+// Слова, после которых число — номер предмета переписки, а не дата и не
+// количество. Стемы: «заявк» ловит «заявка», «заявке», «заявки».
+const OBJECT_NOUNS = "заявк|инцидент|обращени|запрос|задач|тикет|договор|контракт|соглашени|" +
+  "счет|счёт|акт|наряд|заказ|проект|спецификаци|позици|лот|закупк|тендер|" +
+  "ticket|issue|request|incident|case|order|invoice|contract";
+// Слово + номер: «Договор № 15», «Заявка 12345». Число не должно быть датой,
+// поэтому после него не идёт разделитель с цифрой (15.09).
+const OBJECT_NOUN_NUM = new RegExp(
+  `(?<!\\p{L})((${OBJECT_NOUNS})\\p{L}*)\\s*(?:№|#|n[oº]?)?\\s*[:\\-]?\\s*(\\d{2,})(?![\\d]|[./-]\\d)`, "iu");
+// Любое слово перед знаком номера: «Протокол № 3», «Ведомость #12».
+const OBJECT_ANY_NUM = /(?<!\p{L})((\p{L}{3,})\p{L}*)\s*(?:№|#)\s*(\d{2,})(?![\d]|[./-]\d)/iu;
+
+/**
+ * Ключ предмета переписки из темы: по нему письма о нём собираются в одно
+ * дело, даже если ветки разные и писали разные люди. Номер без слова
+ * («№ 15») ключом не считается — он ничей и склеил бы разное.
+ *
+ * @returns {{key: string, label: string}|null}
+ */
+export function objectKey(subject) {
+  const s = String(subject ?? "");
+  const code = OBJECT_CODE.exec(s);
+  if (code) {
+    const digits = code[2].replace(/^0+(?=\d)/, "");
+    return { key: `${code[1].toLowerCase()}-${digits}`, label: `${code[1].toUpperCase()}-${code[2]}` };
+  }
+  const noun = OBJECT_NOUN_NUM.exec(s) ?? OBJECT_ANY_NUM.exec(s);
+  if (noun) {
+    // Ключ — по основе слова: «договору 15» и «договор № 15» об одном.
+    const stem = noun[2].toLowerCase().replace(/ё/g, "е");
+    const digits = noun[3].replace(/^0+(?=\d)/, "");
+    return { key: `${stem}-${digits}`, label: `${noun[1]} № ${noun[3]}` };
+  }
+  return null;
+}
+
 /** Номер объекта в теме письма или null. */
 export function objectId(subject) {
   const s = String(subject ?? "");
@@ -125,6 +161,13 @@ export class SenderProfiler {
     // Ветки, в которых писал я: если я отвечал, это переписка, а не вещание.
     this.myThreads = new Set();
     this.wroteTo = new Set();
+    // Кому адресована почта, приходящая в ящик. Самые частые адреса, кроме
+    // своих, — это списки рассылки, в которых состоит пользователь: без них
+    // «мне в Кому» и «я в копии» считаются неверно.
+    this.recipients = new Map();
+    // Мои письма вне папки «Отправленные» — признак того, что отправитель
+    // писем определяется неверно (проверка доли «моих» писем).
+    this.mine = { total: 0, outsideSent: 0 };
   }
 
   add(row) {
@@ -133,14 +176,23 @@ export class SenderProfiler {
       for (const a of [...(row.to ?? []), ...(row.cc ?? []), ...(row.bcc ?? [])]) this.wroteTo.add(a);
       if (row.threadId) this.myThreads.add(row.threadId);
       if (row.thread?.root) this.myThreads.add(row.thread.root);
+      this.mine.total++;
+      const sent = (row.locations ?? []).some((l) => /sent|отправ/i.test(l));
+      if (!sent) this.mine.outsideSent++;
       return;
+    }
+    for (const a of [...(row.to ?? []), ...(row.cc ?? [])]) {
+      if (!a || this.me.has(a)) continue;
+      if (this.recipients.size < 20000 || this.recipients.has(a)) {
+        this.recipients.set(a, (this.recipients.get(a) ?? 0) + 1);
+      }
     }
     let s = this.stat.get(row.fromId);
     if (!s) {
       s = {
         email: row.fromId, name: "", letters: 0, enriched: 0, replies: 0,
         namedToMe: 0, recipients: 0, withAttachments: 0, threads: new Set(),
-        firstAt: row.date, lastAt: row.date, templates: new Map(), templateHits: 0,
+        firstAt: row.date, lastAt: row.date, templates: new Map(),
       };
       this.stat.set(row.fromId, s);
     }
@@ -155,13 +207,23 @@ export class SenderProfiler {
       s.enriched++;
       if (row.thread?.parent) s.replies++;
     }
-    if (row.threadId) s.threads.add(row.threadId);
+    // Ветка письма: у системы каждое уведомление — своя ветка, у человека
+    // переписка одна на много писем.
+    const thread = row.threadId ?? row.id;
+    s.threads.add(thread);
 
     const t = subjectTemplate(row.subject);
     if (!t) return;
-    const seen = s.templates.get(t);
-    if (seen !== undefined) { s.templates.set(t, seen + 1); s.templateHits++; }
-    else if (s.templates.size < MAX_TEMPLATES) s.templates.set(t, 1);
+    // Тема считается повторяющейся, если встретилась в разных переписках.
+    // Иначе любая ветка из трёх писем с одной темой выглядела бы бланком:
+    // «Договор» и два ответа «RE: Договор» — это разговор, а не шаблон.
+    let threads = s.templates.get(t);
+    if (!threads) {
+      if (s.templates.size >= MAX_TEMPLATES) return;
+      threads = new Set();
+      s.templates.set(t, threads);
+    }
+    threads.add(thread);
   }
 
   /**
@@ -173,11 +235,11 @@ export class SenderProfiler {
   profiles(cfg) {
     const out = new Map();
     for (const [email, s] of this.stat) {
-      // Доля писем, чья тема повторяется у этого же отправителя: у системы
-      // тема — бланк, у человека — разговор.
+      // Доля переписок, чья тема повторяется у этого же отправителя: у
+      // системы тема — бланк на каждое уведомление, у человека — разговор.
       let repeated = 0;
-      for (const n of s.templates.values()) if (n > 1) repeated += n;
-      const templateShare = s.letters ? repeated / s.letters : 0;
+      for (const threads of s.templates.values()) if (threads.size > 1) repeated += threads.size;
+      const templateShare = s.threads.size ? repeated / s.threads.size : 0;
       // Ваши письма — половина картины: по ним видно, был разговор или
       // вещание. Доля веток отправителя, в которых писали вы, — та же
       // величина, на которой потом строятся рёбра графа и делегирование.
@@ -222,6 +284,7 @@ export function classifyKind(p, cfg = {}) {
   const minLetters = cfg.minLetters ?? 0;
   const share = cfg.templateShare ?? 0.5;
   const crowd = cfg.broadcastRecipients ?? 0;
+  const named = cfg.namedShare ?? 0.2;
 
   const pattern = matchSystemAddress(p.email, patterns);
   if (pattern) {
@@ -231,26 +294,70 @@ export function classifyKind(p, cfg = {}) {
       features: ["sender-address"],
     };
   }
-  // Переписка есть — дальше не гадаем: живой человек, с которым вы говорите.
-  const oneWay = minLetters > 0 && p.enriched >= minLetters && p.replies === 0
-    && !p.iWrote && !p.myThread;
-  if (oneWay && p.templateShare >= share) {
+
+  // Главный признак — переписка, а не то, отвечает ли отправитель себе сам.
+  // Система заявок, которая связывает свои уведомления в ветку, раньше не
+  // узнавалась именно из-за этого. Переписка видна по вашим письмам: вы
+  // писали на этот адрес или отвечали в его ветках.
+  if (!minLetters || p.letters < minLetters) {
+    return { kind: "person", why: "обычный отправитель", features: [] };
+  }
+  if (p.iWrote || p.dialogThreads > 0) {
+    return { kind: "person", why: "с этим адресом у вас переписка", features: [] };
+  }
+
+  const base = `писем ${p.letters}, вы этому адресу не писали и в его ветках не отвечали`;
+  if (p.templateShare >= share) {
     return {
       kind: "system",
-      why: `писем ${p.letters}, ни одного ответа в переписке, вы не отвечали и не писали, ` +
-        `темы повторяются (${Math.round(p.templateShare * 100)} %)`,
+      why: `${base}, темы повторяются (${Math.round(p.templateShare * 100)} %)`,
       features: ["sender-one-way", "sender-templated"],
     };
   }
-  if (oneWay && crowd > 0 && p.avgRecipients >= crowd) {
+  if (crowd > 0 && p.avgRecipients >= crowd) {
     return {
       kind: "broadcast",
-      why: `писем ${p.letters}, получателей в среднем ${p.avgRecipients}, ` +
-        "переписки с вами не было",
+      why: `${base}, получателей в среднем ${p.avgRecipients}`,
       features: ["sender-one-way", "sender-crowd"],
     };
   }
+  // Лично к вам он тоже не обращается: вы в копии или среди многих.
+  if (p.namedShare <= named) {
+    return {
+      kind: "broadcast",
+      why: `${base}, лично к вам не обращался`,
+      features: ["sender-one-way", "sender-not-named"],
+    };
+  }
   return { kind: "person", why: "обычный отправитель", features: [] };
+}
+
+// Статус объекта в теме письма системы: «Инцидент INC-1 решён» → «решён».
+// Список правится в настройках: у каждой системы свои слова.
+export function statusOf(subject, words = []) {
+  const s = normalizeSubject(subject);
+  for (const raw of words) {
+    const w = String(raw ?? "").trim().toLowerCase().replace(/ё/g, "е");
+    if (w && s.includes(w)) return w;
+  }
+  return "";
+}
+
+/**
+ * Категория письма системы: тема без номера и статуса — её бланк.
+ * «Инцидент INC001 решён» → «инцидент».
+ */
+export function categoryOf(subject, statusWords = []) {
+  let s = String(subject ?? "");
+  // Код объекта вырезаем целиком: иначе от INC001 остаётся «inc».
+  const code = OBJECT_CODE.exec(s);
+  if (code) s = s.replace(code[0], " ");
+  let t = subjectTemplate(s).replace(/#/g, " ");
+  for (const raw of statusWords) {
+    const w = String(raw ?? "").trim().toLowerCase().replace(/ё/g, "е");
+    if (w && t.includes(w)) t = t.replace(w, " ");
+  }
+  return t.replace(/[\s:;,.\-№#]+/g, " ").trim();
 }
 
 /**
@@ -272,7 +379,10 @@ export async function profileSenders({ db, me, cfg, batch = 2000, onProgress = (
   });
 
   const profiles = profiler.profiles(cfg);
-  const counts = { total: profiles.size, system: 0, broadcast: 0, person: 0, letters: seen };
+  const counts = {
+    total: profiles.size, system: 0, broadcast: 0, person: 0, letters: seen,
+    mine: profiler.mine.total, mineOutsideSent: profiler.mine.outsideSent,
+  };
   const records = [];
   for (const p of profiles.values()) {
     counts[p.kind]++;
@@ -281,7 +391,13 @@ export async function profileSenders({ db, me, cfg, batch = 2000, onProgress = (
     records.push(p);
   }
   await db.putMany("people", records);
-  return { profiles, counts };
+  // Частые адресаты входящей почты — кандидаты в «свои адреса»: списки
+  // рассылки отдела приходят не на личный адрес, и без них адресация
+  // считается неверно.
+  const topRecipients = [...profiler.recipients]
+    .sort((a, b) => b[1] - a[1]).slice(0, 15)
+    .map(([email, letters]) => ({ email, letters }));
+  return { profiles, counts, topRecipients };
 }
 
 /** Профили из `people` — для путей, которые их не считают сами. */

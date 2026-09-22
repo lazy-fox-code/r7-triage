@@ -123,6 +123,7 @@ export class CaseGraph {
     this.paths = {};
     this.tokens = {};
     this.hoverId = null;
+    this.dropId = null;
     this.alpha = 1;
     this.userMoved = false;
     this.data = { cases: [], cross: [], systems: [], selected: null, scope: "all", allPeople: false, expanded: new Set() };
@@ -171,7 +172,8 @@ export class CaseGraph {
       const p = prev[c.id] || { x: Math.cos(i) * (180 + (i % 3) * 54), y: Math.sin(i) * (180 + (i % 3) * 54) };
       nodes.push({ id: c.id, t: "deal", role: focus ? (c === focus ? "center" : "far") : "deal",
         r: dealR(c), x: p.x, y: p.y, deal: c, state: c.state, label: c.title, count: artifacts(c),
-        born: prev[c.id] ? (prev[c.id].born || 0) : bornNow, pulse: p.pulse || 0 });
+        // Узел, поставленный рукой, остаётся там, куда его поставили.
+        pinned: p.pinned, born: prev[c.id] ? (prev[c.id].born || 0) : bornNow, pulse: p.pulse || 0 });
     });
 
     if (focus) {
@@ -207,13 +209,19 @@ export class CaseGraph {
     if (!focus) {
       for (const sys of this.data.systems ?? []) {
         const ids = sys.cases.filter((id) => vis.has(id));
-        if (ids.length < 2) continue;
+        // Свёрнутая система — одна фишка с числом дел: её уведомления не
+        // закрывают собой переписку. Развёрнутая держит свои дела рядом.
+        const shown = sys.collapsed ? [] : ids;
+        if (!sys.collapsed && ids.length < 2) continue;
+        const count = sys.cases.length;
         const p = prev[sys.id] || { x: (Math.random() - 0.5) * 420, y: (Math.random() - 0.5) * 420 };
-        nodes.push({ id: sys.id, t: "system", role: "system", g: "system", r: 13, x: p.x, y: p.y,
-          label: sys.name, email: sys.email,
-          why: `${ids.length} ${plural(ids.length, ["дело", "дела", "дел"])} · ${sys.why}`,
+        nodes.push({ id: sys.id, t: "system", role: "system", g: "system",
+          r: sys.collapsed ? 15 : 13, x: p.x, y: p.y,
+          label: sys.name, email: sys.email, count: sys.collapsed ? count : 0,
+          collapsed: sys.collapsed, pinned: prev[sys.id]?.pinned,
+          why: `${count} ${plural(count, ["дело", "дела", "дел"])} · ${sys.why}`,
           born: prev[sys.id] ? (prev[sys.id].born || 0) : bornNow });
-        for (const id of ids) links.push({ a: sys.id, b: id, kind: "system", why: "письма одной системы" });
+        for (const id of shown) links.push({ a: sys.id, b: id, kind: "system", why: "письма одной системы" });
       }
     }
 
@@ -324,7 +332,8 @@ export class CaseGraph {
         const min = n1.r + n2.r + ((n1.t === "deal" && n2.t === "deal") ? 92 : 20);
         if (d < min) {
           const f = (min - d) / d * 0.28 * a;
-          n1.x -= dx * f; n1.y -= dy * f; n2.x += dx * f; n2.y += dy * f;
+          if (!n1.pinned) { n1.x -= dx * f; n1.y -= dy * f; }
+          if (!n2.pinned) { n2.x += dx * f; n2.y += dy * f; }
         }
       }
     }
@@ -337,9 +346,13 @@ export class CaseGraph {
       const dy = n2.y - n1.y;
       const d = Math.sqrt(dx * dx + dy * dy) || 0.01;
       const f = (d - want) / d * 0.08 * a;
-      n1.x += dx * f; n1.y += dy * f; n2.x -= dx * f; n2.y -= dy * f;
+      if (!n1.pinned) { n1.x += dx * f; n1.y += dy * f; }
+      if (!n2.pinned) { n2.x -= dx * f; n2.y -= dy * f; }
     }
-    for (const n of ns) { n.x -= n.x * 0.004 * a; n.y -= n.y * 0.004 * a; }
+    for (const n of ns) {
+      if (n.pinned) continue;
+      n.x -= n.x * 0.004 * a; n.y -= n.y * 0.004 * a;
+    }
   }
 
   frame() {
@@ -411,10 +424,14 @@ export class CaseGraph {
       ctx.globalAlpha = al * grow;
       if (n.t === "deal") this.drawDeal(ctx, n, grow, now, red);
       else this.drawChip(ctx, n, grow);
-      if (this.hoverId === n.id) {
+      if (this.hoverId === n.id || this.dropId === n.id) {
         ctx.globalAlpha = 1; ctx.beginPath();
-        ctx.arc(n.x, n.y, (n.rBig || n.rSmall || n.r) + 6, 0, Math.PI * 2);
-        ctx.lineWidth = 1.5; ctx.strokeStyle = T["--c-accent"]; ctx.stroke();
+        ctx.arc(n.x, n.y, (n.rBig || n.rSmall || n.r) + (this.dropId === n.id ? 10 : 6), 0, Math.PI * 2);
+        ctx.lineWidth = this.dropId === n.id ? 2.5 : 1.5;
+        ctx.strokeStyle = T["--c-accent"];
+        ctx.setLineDash(this.dropId === n.id ? [4, 3] : []);
+        ctx.stroke();
+        ctx.setLineDash([]);
       }
     }
 
@@ -550,7 +567,7 @@ export class CaseGraph {
     } else {
       this.icon(ctx, n.g, x, gy, gs, c);
     }
-    if (n.count && n.openable) this.badge(ctx, x + hw * 0.92, y - hh * 0.86, n.count, c);
+    if (n.count && (n.openable || n.t === "system")) this.badge(ctx, x + hw * 0.92, y - hh * 0.86, n.count, c);
     if (n.openable) {
       const px = x - hw * 0.92;
       const py = y + hh * 0.86;
@@ -619,25 +636,47 @@ export class CaseGraph {
 
   bindEvents() {
     const el = this.canvas;
+    // Взяли узел — тянем узел; взяли пустое место — тянем всё полотно.
+    // Дело, брошенное на другое дело, предлагает их объединить.
     let drag = null;
     el.addEventListener("pointerdown", (e) => {
       const p = this.toWorld(e);
-      drag = { x: e.clientX, y: e.clientY, vx: this.view.x, vy: this.view.y, node: this.hit(p.x, p.y), moved: false };
+      const node = this.hit(p.x, p.y);
+      drag = {
+        x: e.clientX, y: e.clientY, vx: this.view.x, vy: this.view.y,
+        node, moved: false,
+        // Узел тянем за ту точку, за которую взяли, — он не прыгает под курсор.
+        grab: node ? { dx: node.x - p.x, dy: node.y - p.y } : null,
+      };
       el.setPointerCapture(e.pointerId);
+      el.style.cursor = node ? "grabbing" : "move";
     });
     el.addEventListener("pointermove", (e) => {
       if (drag) {
         const dx = e.clientX - drag.x;
         const dy = e.clientY - drag.y;
         if (Math.abs(dx) + Math.abs(dy) > 3) {
-          drag.moved = true; this.userMoved = true; this.cam = null;
-          this.view.x = drag.vx + dx; this.view.y = drag.vy + dy;
+          drag.moved = true;
+          this.cam = null;
+          if (drag.node) {
+            const p = this.toWorld(e);
+            drag.node.x = p.x + drag.grab.dx;
+            drag.node.y = p.y + drag.grab.dy;
+            drag.node.pinned = true;
+            // Что под курсором: цель для объединения дел.
+            const over = this.hit(p.x, p.y, drag.node);
+            this.dropId = (drag.node.t === "deal" && over?.t === "deal") ? over.id : null;
+          } else {
+            this.userMoved = true;
+            this.view.x = drag.vx + dx; this.view.y = drag.vy + dy;
+          }
         }
         return;
       }
       const p = this.toWorld(e);
       const n = this.hit(p.x, p.y);
       const id = n ? n.id : null;
+      el.style.cursor = n ? "grab" : "default";
       if (id !== this.hoverId) {
         this.hoverId = id;
         const r = el.getBoundingClientRect();
@@ -646,10 +685,19 @@ export class CaseGraph {
       }
     });
     el.addEventListener("pointerup", () => {
+      el.style.cursor = "default";
       if (drag && !drag.moved && drag.node) this.pickNode(drag.node);
+      if (drag?.moved && drag.node && this.dropId) {
+        this.hooks.onMerge?.(drag.node.id, this.dropId);
+      }
+      this.dropId = null;
       drag = null;
     });
-    el.addEventListener("pointerleave", () => { drag = null; this.hoverId = null; this.hooks.onTip?.(null); });
+    el.addEventListener("pointerleave", () => {
+      drag = null; this.dropId = null; this.hoverId = null;
+      el.style.cursor = "default";
+      this.hooks.onTip?.(null);
+    });
     el.addEventListener("wheel", (e) => {
       e.preventDefault();
       const r = el.getBoundingClientRect();
@@ -670,10 +718,11 @@ export class CaseGraph {
     return { x: (e.clientX - r.left - v.x) / v.k, y: (e.clientY - r.top - v.y) / v.k };
   }
 
-  hit(x, y) {
+  hit(x, y, except = null) {
     let best = null;
     let bd = 1e9;
     for (const n of this.nodes) {
+      if (n === except) continue;
       const R = (n.rBig || n.rSmall || (n.t === "deal" ? n.r : n.r * 1.3)) + 6;
       const d = Math.hypot(n.x - x, n.y - y);
       if (d < R && d < bd) { bd = d; best = n; }
@@ -683,11 +732,12 @@ export class CaseGraph {
 
   tipSub(n) {
     const kind = KIND_NAME[n.t] || "Элемент";
-    if (n.t === "system") return `${kind} · ${n.why} · нажмите, чтобы показать только её дела`;
+    if (n.t === "system") return `${kind} · ${n.why} · нажмите, чтобы открыть таблицу`;
     if (n.t === "deal") {
       const c = n.deal;
       return `${kind} · ${STATES[n.state]?.name ?? ""} · ${c.counts.mail} ${plural(c.counts.mail, ["письмо", "письма", "писем"])}` +
-        (c.counts.meet ? ` · встреч ${c.counts.meet}` : "") + (c.counts.conf ? ` · конференций ${c.counts.conf}` : "");
+        (c.counts.meet ? ` · встреч ${c.counts.meet}` : "") + (c.counts.conf ? ` · конференций ${c.counts.conf}` : "") +
+        (c.object ? ` · ${c.object}` : "") + " · перетащите на другое дело, чтобы объединить";
     }
     return kind + (n.why ? ` · почему в деле: ${n.why}` : "") + (n.sub ? ` · ${n.sub}` : "") +
       (n.openable ? " · нажмите, чтобы развернуть" : "") + (n.letterId ? " · нажмите, чтобы открыть письмо" : "");

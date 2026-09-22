@@ -170,6 +170,17 @@
     <input type="number" id="casesNewDays" min="1" max="365">
   </label>
   <label>
+    <span>Склеивать письма с одинаковой темой и общим участником, дней</span>
+    <input type="number" id="casesSubjectJoinDays" min="0" max="3650">
+    <span class="hint">Когда References в письмах нет, переписка собирается по
+      теме: одинаковая тема, общий участник и разрыв не больше этого срока.
+      Ноль — не склеивать по теме.</span>
+  </label>
+  <label>
+    <input type="checkbox" id="casesJoinByObject">
+    Собирать письма об одном предмете: «Договор № 15», INC-0012345
+  </label>
+  <label>
     <span>Сколько ранних писем поднимать ради истории дел</span>
     <input type="number" id="casesHistoryLimit" min="0" max="200000">
     <span class="hint">Предел на всю вкладку. Достигнут — дела, начавшиеся
@@ -241,6 +252,20 @@
   <label>
     <span>Не больше запросов за сеанс</span>
     <input type="number" id="dirMaxPerSession" min="0" max="100000">
+  </label>
+
+  <h2>Отсев по адресации</h2>
+  <label>
+    <input type="checkbox" id="gateCcOnlyIsInfo">
+    Я в копии, а не в «Кому» — информирование без модели
+  </label>
+  <label>
+    <input type="checkbox" id="gateUnaddressedIsInfo">
+    Меня нет ни в «Кому», ни в копии — информирование без модели
+    <span class="hint">Такое письмо пришло через список рассылки или общий
+      ящик. Если с отправителем есть переписка, письмо всё равно идёт в
+      модель. Проверьте «Свои адреса» ниже: без списков рассылки, в которых
+      вы состоите, адресация считается неверно.</span>
   </label>
 
   <h2>Свои адреса</h2>

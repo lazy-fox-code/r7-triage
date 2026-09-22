@@ -3,6 +3,7 @@
 // незачем.
 
 import * as db from "../db.js";
+import * as settings from "../settings.js";
 
 const $ = (id) => document.getElementById(id);
 const num = (n) => (n == null ? "—" : String(n).replace(/\B(?=(\d{3})+(?!\d))/g, " "));
@@ -40,6 +41,21 @@ function sampleTable(title, rows) {
     <table><tr><th>Дата</th><th>От кого</th><th>Тема</th><th>Причина</th></tr>${body}</table>`;
 }
 
+/**
+ * Частые адресаты входящей почты — кандидаты в «свои адреса». Списки
+ * рассылки отдела приходят не на личный адрес, и пока их нет в настройках,
+ * «мне в Кому» и «я в копии» считаются неверно, а с ними — весь отсев.
+ */
+function recipientsBlock(rows, mine) {
+  if (!rows?.length) return "";
+  const body = rows.map((x) => `<tr><td>${esc(x.email)}</td><td class="v">${num(x.letters)}</td>
+    <td><button data-alias="${esc(x.email)}">это мой адрес</button></td></tr>`).join("");
+  return `<p>Кому адресована приходящая почта (${num(mine)} своих адресов в расчёте).
+    Если среди этих адресов есть списки рассылки, в которых вы состоите, добавьте их —
+    без них адресация считается неверно.</p>
+    <table><tr><th>Адрес</th><th>Писем</th><th></th></tr>${body}</table>`;
+}
+
 function renderGate(r) {
   if (!r) { $("gateOut").textContent = "Ещё не считали."; return; }
   const rows = [
@@ -54,14 +70,39 @@ function renderGate(r) {
   ];
   const reasons = Object.entries(r.reasons ?? {}).sort((a, b) => b[1] - a[1])
     .map(([k, v]) => `<tr><td>${esc(k)}</td><td class="v">${num(v)}</td></tr>`).join("");
+  const left = Object.entries(r.modelReasons ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 12)
+    .map(([k, v]) => `<tr><td>${esc(k)}</td><td class="v">${num(v)}</td></tr>`).join("");
+  const senders = r.senders ? `<p>Отправители:</p><table>
+    <tr><td>всего адресов</td><td class="v">${num(r.senders.total)}</td></tr>
+    <tr><td>информационных систем</td><td class="v">${num(r.senders.system)}</td></tr>
+    <tr><td>вещание на многих</td><td class="v">${num(r.senders.broadcast)}</td></tr>
+    <tr><td>обычных отправителей</td><td class="v">${num(r.senders.person)}</td></tr>
+    <tr><td>своих писем, из них вне папки «Отправленные»</td>
+      <td class="v">${num(r.senders.mine)} / ${num(r.senders.mineOutsideSent)}</td></tr></table>` : "";
   $("gateOut").innerHTML = `
     <table>${rows.map(([k, v]) => `<tr><td>${k}</td><td class="v">${v}</td></tr>`).join("")}</table>
     ${reasons ? `<p>По причинам:</p><table>${reasons}</table>` : ""}
+    ${left ? `<p>Осталось модели — чем письма попали в очередь:</p><table>${left}</table>` : ""}
+    ${senders}
+    ${recipientsBlock(r.topRecipients, r.myAddresses)}
     ${sampleTable("Для проверки глазами: случайные письма, отсеянные как шум", r.samples?.noise)}
     ${sampleTable("…и как информирование", r.samples?.info)}
     <p>Посчитано ${when(r.at)}. Доля — от писем, по которым отсев мог решать:
     без своих и недочитанных.</p>`;
 }
+
+// Кнопка «это мой адрес» рядом с частым адресатом: дописывает его в свои
+// адреса. После этого замер отсева стоит посчитать заново.
+document.addEventListener("click", async (e) => {
+  const email = e.target?.dataset?.alias;
+  if (!email) return;
+  const cfg = await settings.load();
+  if (!cfg.me.aliases.includes(email)) {
+    await settings.save("me", { aliases: [...cfg.me.aliases, email] });
+  }
+  e.target.textContent = "добавлен — пересчитайте отсев";
+  e.target.disabled = true;
+});
 
 async function refresh() {
   const counts = await db.stats();

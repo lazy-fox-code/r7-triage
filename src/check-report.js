@@ -149,6 +149,12 @@ export function casesSummary(cases, cross, { systems = [], history = null, perio
     joinedByMeeting: cases.filter((c) => c.joinedBy.meeting).length,
     joinedByOutlook: cases.filter((c) => c.joinedBy.outlook && !c.joinedBy.thread).length,
     joinedBySystem: cases.filter((c) => c.joinedBy.system).length,
+    joinedByObject: cases.filter((c) => c.joinedBy.object).length,
+    joinedBySubject: cases.filter((c) => c.joinedBy.subject).length,
+    joinedManually: cases.filter((c) => c.joinedBy.manual).length,
+    withObject: cases.filter((c) => c.object).length,
+    systemCasesCollapsed: cases.filter((c) => c.systemOwner).length,
+    big: cases.filter((c) => c.counts.mail >= 3 && c.counts.people >= 2).length,
     startedBefore: cases.filter((c) => c.startedBefore).length,
     singleLetter: sizes.filter((n) => n === 1).length,
     medianLetters: sizes.length ? sizes[Math.floor(sizes.length / 2)] : 0,
@@ -173,7 +179,9 @@ export async function collect({ db, cfg, env, gate, me, trueconfSession, cases =
       queue: await db.enrichCounts(),
       stats: enrichState?.stats ?? null,
       lastError: enrichState?.error ?? null,
-      gate: gate ? { ...gate, samples: undefined } : null,
+      // Выборка писем и адреса-кандидаты остаются на экране: в файле только
+      // числа, флаги и названия полей.
+      gate: gate ? { ...gate, samples: undefined, topRecipients: undefined } : null,
       formats: await formatStats(db),
       myAddresses: me?.size ?? null,
       aliases: cfg.me.aliases.length,
@@ -258,8 +266,8 @@ function headline(id, a) {
     }
     case "T4": {
       const c = a.T4.cases;
-      return c ? `дел с движением за ${num(c.periodDays ?? 30)} дней ${num(c.cases)}, новых ${num(c.fresh)}, ` +
-        `систем ${num(c.systems)}, склеено по объекту ${num(c.joinedBySystem)}` : "";
+      return c ? `дел с движением за ${num(c.periodDays ?? 30)} дней ${num(c.cases)}, из одного письма ${num(c.singleLetter)}, ` +
+        `крупных ${num(c.big)}, систем ${num(c.systems)} (их дел ${num(c.systemCases)})` : "";
     }
     case "T5": {
       const c = a.T5.check;
@@ -326,6 +334,17 @@ function stageDetails(id, a) {
         }
         const reasons = Object.entries(g.reasons ?? {}).sort((x, y) => y[1] - x[1]);
         if (reasons.length) out += "\n\n" + table(["Причина", "Писем"], reasons.map(([k, v]) => [k, num(v)]));
+        const left = Object.entries(g.modelReasons ?? {}).sort((x, y) => y[1] - x[1]).slice(0, 12);
+        if (left.length) {
+          out += "\n\nОсталось модели — чем письма попали в очередь:\n\n"
+            + table(["Адресация · отправитель · ветка", "Писем"], left.map(([k, v]) => [k, num(v)]));
+        }
+        if (g.senders?.mine != null) {
+          out += "\n\n" + table(["Свои письма", "Сколько"], [
+            ["Всего", num(g.senders.mine)],
+            ["Вне папки «Отправленные»", num(g.senders.mineOutsideSent)],
+          ]);
+        }
       }
       return out;
     }
@@ -359,8 +378,11 @@ function stageDetails(id, a) {
           `${num(c.cases)} / ${num(c.fresh)}`],
         ["Со встречами / с конференциями", `${num(c.withMeetings)} / ${num(c.withConferences)}`],
         ["Склеены по встрече / только по беседе Outlook", `${num(c.joinedByMeeting)} / ${num(c.joinedByOutlook)}`],
-        ["Склеены по объекту системы", num(c.joinedBySystem)],
-        ["Систем / их дел", `${num(c.systems)} / ${num(c.systemCases)}`],
+        ["Склеены по предмету из темы / по теме и участнику", `${num(c.joinedByObject)} / ${num(c.joinedBySubject)}`],
+        ["Склеены по объекту системы / объединены вручную", `${num(c.joinedBySystem)} / ${num(c.joinedManually)}`],
+        ["Дел с названным предметом", num(c.withObject)],
+        ["Систем / их дел (сворачиваются в списке)", `${num(c.systems)} / ${num(c.systemCases)}`],
+        ["Крупных дел (3+ писем, 2+ участников)", num(c.big)],
         ["Начались раньше периода / поднято ранних писем", `${num(c.startedBefore)} / ${num(c.earlyLetters)}`],
         ["Предел поднятой истории достигнут", c.historyTruncated ? "да" : "нет"],
         ["Из одного письма", num(c.singleLetter)],
