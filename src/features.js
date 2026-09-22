@@ -9,14 +9,18 @@
 
 import { normalizeAddress } from "./keys.js";
 import { ENRICH } from "./db.js";
+import { actionHint } from "./senders.js";
 
 export { normalizeAddress as normalize };
 
 /**
  * @param {object} row запись из хранилища `messages`
  * @param {Set<string>} me нормализованные адреса пользователя
+ * @param {Map<string, object>|null} senders профили отправителей
+ *   (`senders.js`). Их нет — правила по отправителю не работают, остальные
+ *   работают как прежде.
  */
-export function derive(row, me) {
+export function derive(row, me, senders = null) {
   const to = row.to ?? [];
   const inTo = to.some((a) => me.has(a));
   const inCc = (row.cc ?? []).some((a) => me.has(a));
@@ -49,6 +53,10 @@ export function derive(row, me) {
     hasAttachments: row.hasAttachments ?? null,
     calendarMethod: cal?.method ?? null,
     calendarKind: cal?.kind ?? null,
+
+    // Кто пишет: профиль отправителя из его же писем. Считается отдельным
+    // проходом и живёт в `people`; здесь только читается.
+    sender: senders?.get(row.fromId) ?? null,
   };
 }
 
@@ -112,6 +120,26 @@ export function gate(f, cfg) {
   if (f.inCc && !f.inTo && f.recipientCount > cfg.massCcRecipients) {
     return decided("info", 0.8, "копия массовой рассылки", ["cc-only", "recipient-count"],
       `Копия, получателей: ${f.recipientCount}`);
+  }
+
+  // Отправитель. В закрытом периметре заголовков рассылки у писем нет
+  // (замер 22.09.2026), и единственный дешёвый признак — поведение
+  // отправителя: кто пишет, отвечает ли, повторяются ли темы. Профиль
+  // считается по самим письмам, см. `senders.js`.
+  //
+  // Признак действия в теме возвращает письмо модели: «вам назначен
+  // инцидент» — поручение, кем бы оно ни было отправлено. Отправитель
+  // решает, нужна ли модель, но не решает класс письма.
+  const s = f.sender;
+  if (s && (s.kind === "system" || s.kind === "broadcast")) {
+    const hint = actionHint(f.subject, cfg.actionWords);
+    if (hint) {
+      return { outcome: "model", reason: `от вас могут ждать действия: «${hint}» в теме` };
+    }
+    const noun = s.kind === "system" ? "уведомление информационной системы" : "вещание на многих";
+    return decided("info", s.kind === "system" ? 0.85 : 0.8, noun,
+      ["sender-kind", ...(s.features ?? [])],
+      `Тема: ${f.subject || "(без темы)"} · отправитель: ${s.why}`);
   }
 
   if (f.enriched === ENRICH.PENDING) {

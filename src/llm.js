@@ -1,8 +1,9 @@
 // Клиент локальной модели. OpenAI-совместимый /v1/chat/completions.
 //
 // Два требования, нарушение которых ломает проект:
-//   1. Формат ответа фиксируется схемой (guided_json в vLLM, GBNF
-//      в llama.cpp). Парсить свободный текст от модели 7-14B нельзя.
+//   1. Формат ответа фиксируется схемой — `response_format: json_schema`,
+//      как у OpenAI: так её понимают и vLLM, и SGLang, и сервер llama.cpp.
+//      Парсить свободный текст от модели 7-14B нельзя.
 //   2. Модель не рассуждающая. R1-дистилляты выдают длинный блок
 //      рассуждений перед ответом, на тысячах писем это неприемлемо.
 
@@ -37,8 +38,15 @@ export class LlmClient {
         temperature: 0,
         max_tokens: 400,
         messages: buildPrompt({ subject, from, senderLevel, body, features }),
-        // vLLM. Для llama.cpp заменить на { grammar: GBNF }.
-        guided_json: VERDICT_SCHEMA,
+        // Схема ответа по стандарту OpenAI: её понимают vLLM, SGLang и
+        // сервер llama.cpp. Прежний `guided_json` — расширение vLLM, и на
+        // свежих сборках он молча игнорируется: запрос проходит, ответ
+        // приходит в произвольном виде. Проверка модели 22.09.2026 поймала
+        // это ровно так — JSON 6 из 6, по схеме 0 из 6.
+        response_format: {
+          type: "json_schema",
+          json_schema: { name: "verdict", schema: VERDICT_SCHEMA },
+        },
       });
       const message = res.choices?.[0]?.message ?? {};
       const content = message.content ?? "";

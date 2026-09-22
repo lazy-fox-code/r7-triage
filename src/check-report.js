@@ -130,20 +130,34 @@ function scanSummary(checkpoints) {
  * Все автоматические метрики. Зависимости внедряются — страница передаёт
  * настоящие, тесты свои.
  */
-/** Сводка по делам за 30 дней — из buildCases, только числа. */
-export function casesSummary(cases, cross) {
+/**
+ * Сводка по делам с движением за период — из buildCases, только числа.
+ *
+ * @param {object[]} cases дела
+ * @param {object[]} cross связи между делами (конференции)
+ * @param {object} extra systems — системы и их дела, history — поднятые
+ *                 ранние письма, periodDays — период
+ */
+export function casesSummary(cases, cross, { systems = [], history = null, periodDays = null } = {}) {
   const sizes = cases.map((c) => c.counts.mail).sort((a, b) => a - b);
   return {
+    periodDays,
     cases: cases.length,
     fresh: cases.filter((c) => c.state === "new").length,
     withMeetings: cases.filter((c) => c.counts.meet).length,
     withConferences: cases.filter((c) => c.counts.conf).length,
     joinedByMeeting: cases.filter((c) => c.joinedBy.meeting).length,
     joinedByOutlook: cases.filter((c) => c.joinedBy.outlook && !c.joinedBy.thread).length,
+    joinedBySystem: cases.filter((c) => c.joinedBy.system).length,
+    startedBefore: cases.filter((c) => c.startedBefore).length,
     singleLetter: sizes.filter((n) => n === 1).length,
     medianLetters: sizes.length ? sizes[Math.floor(sizes.length / 2)] : 0,
     maxLetters: sizes.length ? sizes[sizes.length - 1] : 0,
     crossLinks: cross.length,
+    systems: systems.length,
+    systemCases: systems.reduce((n, s) => n + s.cases.length, 0),
+    earlyLetters: history?.added ?? 0,
+    historyTruncated: Boolean(history?.truncated),
   };
 }
 
@@ -229,9 +243,12 @@ function headline(id, a) {
       return `писем ${num(a.T1.counts.messages)}; свежий проход ${duration(p.recent?.durationMs)}, ` +
         `архив ${duration(p.archive?.durationMs)}`;
     }
-    case "T2":
+    case "T2": {
+      const senders = a.T2.gate?.senders;
       return `отсев ${pct(a.T2.gate?.removedShare)}; дочитано ${num(a.T2.queue.done)}, ` +
-        `в очереди ${num(a.T2.queue.pending)}; долгих чтений ${num(a.T2.stats?.slowReads)}`;
+        `в очереди ${num(a.T2.queue.pending)}; долгих чтений ${num(a.T2.stats?.slowReads)}` +
+        (senders ? `; систем ${num(senders.system)}, вещания ${num(senders.broadcast)}` : "");
+    }
     case "T3": {
       const c = a.T3.check;
       if (!c) return a.T3.endpointSet ? "модель задана, проверка не запускалась" : "модель не подключена";
@@ -241,7 +258,8 @@ function headline(id, a) {
     }
     case "T4": {
       const c = a.T4.cases;
-      return c ? `дел за 30 дней ${num(c.cases)}, новых ${num(c.fresh)}, со встречами ${num(c.withMeetings)}` : "";
+      return c ? `дел с движением за ${num(c.periodDays ?? 30)} дней ${num(c.cases)}, новых ${num(c.fresh)}, ` +
+        `систем ${num(c.systems)}, склеено по объекту ${num(c.joinedBySystem)}` : "";
     }
     case "T5": {
       const c = a.T5.check;
@@ -298,6 +316,14 @@ function stageDetails(id, a) {
           ["Шум / информирование / в модель", `${num(g.noise)} / ${num(g.info)} / ${num(g.model)}`],
           ["Отсеяно без модели", pct(g.removedShare)],
         ]);
+        if (g.senders) {
+          out += "\n\n" + table(["Отправители", "Сколько"], [
+            ["Всего адресов", num(g.senders.total)],
+            ["Информационных систем", num(g.senders.system)],
+            ["Вещание на многих", num(g.senders.broadcast)],
+            ["Обычных отправителей", num(g.senders.person)],
+          ]);
+        }
         const reasons = Object.entries(g.reasons ?? {}).sort((x, y) => y[1] - x[1]);
         if (reasons.length) out += "\n\n" + table(["Причина", "Писем"], reasons.map(([k, v]) => [k, num(v)]));
       }
@@ -315,6 +341,7 @@ function stageDetails(id, a) {
           ["Проверка", when(c.at)],
           ["Ответили / JSON / по схеме / верно", `${c.answered} / ${c.validJson} / ${c.schemaOk} / ${c.correct} из ${c.total}`],
           ["Рассуждающая модель", yes(c.reasoningDetected)],
+          ["Поля ответа модели", (c.answerFields ?? []).join(", ") || "—"],
           ["Время ответа мин / медиана / макс", c.latencyMs
             ? `${duration(c.latencyMs.min)} / ${duration(c.latencyMs.median)} / ${duration(c.latencyMs.max)}` : "—"],
           ["Писем в минуту (оценка)", num(c.perMinute)],
@@ -328,9 +355,14 @@ function stageDetails(id, a) {
       const c = a.T4.cases;
       if (!c) return "";
       return table(["Показатель", "Значение"], [
-        ["Дел за 30 дней / новых (есть непрочитанное)", `${num(c.cases)} / ${num(c.fresh)}`],
+        [`Дел с движением за ${num(c.periodDays ?? 30)} дней / новых (есть непрочитанное)`,
+          `${num(c.cases)} / ${num(c.fresh)}`],
         ["Со встречами / с конференциями", `${num(c.withMeetings)} / ${num(c.withConferences)}`],
         ["Склеены по встрече / только по беседе Outlook", `${num(c.joinedByMeeting)} / ${num(c.joinedByOutlook)}`],
+        ["Склеены по объекту системы", num(c.joinedBySystem)],
+        ["Систем / их дел", `${num(c.systems)} / ${num(c.systemCases)}`],
+        ["Начались раньше периода / поднято ранних писем", `${num(c.startedBefore)} / ${num(c.earlyLetters)}`],
+        ["Предел поднятой истории достигнут", c.historyTruncated ? "да" : "нет"],
         ["Из одного письма", num(c.singleLetter)],
         ["Писем в деле: медиана / максимум", `${num(c.medianLetters)} / ${num(c.maxLetters)}`],
         ["Связей между делами через конференции", num(c.crossLinks)],

@@ -1,8 +1,12 @@
 // Вкладка «Дела»: список, граф, карточка, строка сбора и лента событий.
 //
-// Дела собираются из писем за последние 30 дней (cases.js). Пока модель не
-// подключена, дело — это ветка, встреча или беседа Outlook без поручений и
-// сроков; вкладка говорит об этом прямо.
+// Показываются дела, в которых было движение за период из настроек (по
+// умолчанию 30 дней), но собирается каждое с первого письма: ранние письма
+// той же ветки поднимаются из базы (cases.js, loadCaseRows). Хронология в
+// карточке идёт от старых записей к новым — по ней читается жизненный цикл
+// дела. Пока модель не подключена, дело — это ветка, встреча, беседа
+// Outlook или объект информационной системы без поручений и сроков;
+// вкладка говорит об этом прямо.
 //
 // Открытие вкладки запускает дочитывание новых писем. Пока идёт обогащение,
 // дела пересобираются, и граф растёт на глазах: новые письма прирастают к
@@ -14,12 +18,12 @@
 import * as db from "../db.js";
 import * as settings from "../settings.js";
 import { myAddresses } from "../me.js";
-import { buildCases, diffCases, displaySubject } from "../cases.js";
+import { buildCases, diffCases, displaySubject, loadCaseRows } from "../cases.js";
 import { CaseGraph, STATE_NAMES, plural, initials } from "./cases-graph.js";
+import { DirectoryLookup } from "../directory.js";
 import { TrueConfApi } from "../trueconf-api.js";
 
 const DAY = 86400000;
-const PERIOD_DAYS = 30;
 const MAX_CASES = 300;
 const REBUILD_MS = 1500;
 const TL_STEP = 30;
@@ -29,6 +33,10 @@ const S = {
   me: new Set(),
   cases: [],
   cross: [],
+  systems: [],
+  history: { added: 0, truncated: false },
+  historyWarned: false,
+  since: null,
   byId: new Map(),
   selected: null,
   filter: "all",
@@ -73,7 +81,13 @@ function icon(id, size = 14) {
 }
 
 const num = (n) => String(n ?? 0).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
-const day = (ms) => (ms ? new Date(ms).toLocaleDateString("ru-RU", { day: "numeric", month: "short" }) : "");
+// Дело может начаться в прошлом году — тогда год виден.
+const day = (ms) => {
+  if (!ms) return "";
+  const d = new Date(ms);
+  const year = d.getFullYear() === new Date().getFullYear() ? undefined : "numeric";
+  return d.toLocaleDateString("ru-RU", { day: "numeric", month: "short", year });
+};
 const stamp = (ms) => (ms ? new Date(ms).toLocaleString("ru-RU",
   { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "");
 const clock = () => new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
@@ -82,11 +96,24 @@ const STATE_COLOR = { new: "var(--st-new)", branch: "var(--st-stale)" };
 // --- данные -------------------------------------------------------------------
 
 async function rebuild({ initial = false } = {}) {
-  const rows = await db.messagesInDateRange(Date.now() - PERIOD_DAYS * DAY, null);
-  const { cases, cross } = buildCases(rows, { me: S.me, gateCfg: S.cfg.gate });
+  const since = Date.now() - S.cfg.cases.periodDays * DAY;
+  S.since = since;
+  const { rows, systems: found, history } = await loadCaseRows(db,
+    { since, me: S.me, cfg: S.cfg.cases, sendersCfg: S.cfg.senders });
+  const { cases, cross, systems } = buildCases(rows,
+    { me: S.me, gateCfg: S.cfg.gate, cfg: S.cfg.cases, sendersCfg: S.cfg.senders, systems: found, since });
   const events = S.built ? diffCases(S.cases, cases) : [];
   S.cases = cases;
   S.cross = cross;
+  S.systems = systems;
+  S.history = history;
+  // Предел подъёма ранних писем — не молча: часть дел показана не с начала.
+  if (history.truncated && !S.historyWarned) {
+    S.historyWarned = true;
+    pushEvent({ icon: "i-warn", kind: "err",
+      what: `Ранние письма подняты не для всех дел: предел ${num(S.cfg.cases.historyLimit)}`,
+      why: "поднять предел — настройки → Дела" });
+  }
   S.byId = new Map(cases.map((c) => [c.id, c]));
   if (S.selected && !S.byId.has(S.selected)) S.selected = null;
   S.built = true;
@@ -140,7 +167,7 @@ function render({ initial = false } = {}) {
   renderCard();
   renderOverlay(vis.length, shown.length);
   graph.setData({
-    cases: shown, cross: S.cross, selected: S.selected, scope: S.scope,
+    cases: shown, cross: S.cross, systems: S.systems, selected: S.selected, scope: S.scope,
     allPeople: S.allPeople, expanded: S.expanded,
   }, { initial });
 }
@@ -251,9 +278,43 @@ function timeline(c) {
         h("div", { class: "tl-sub", text: f.host ? `сервер ${f.host}` : "ссылка без имени сервера" }),
         whyChip("почему в деле: номер и тема конференции из ссылки в письме"))) });
   }
-  items.sort((a, b) => b.at - a.at);
+  // От старых записей к новым: дело читается как история — с чего началось
+  // и чем закончилось на сегодня.
+  items.sort((a, b) => a.at - b.at);
   return items;
 }
+
+/**
+ * Хронология со свёрнутой серединой: первая запись — начало дела — видна
+ * всегда, дальше идут последние записи, а между ними кнопка разворачивает
+ * ранние. Иначе у дела на сотню писем самое свежее пряталось бы в конце.
+ */
+function timelineSection(tl, sec) {
+  const hidden = Math.max(0, tl.length - S.tlLimit);
+  const head = hidden ? tl.slice(0, 1) : [];
+  const tail = hidden ? tl.slice(tl.length - (S.tlLimit - 1)) : tl;
+  let shownEarly = null;
+  const append = (it) => {
+    // Граница периода: дальше идут записи, из-за которых дело и показано.
+    if (shownEarly === true && !isEarly(it)) {
+      sec.append(h("div", { class: "tl-sep",
+        text: `последние ${S.cfg.cases.periodDays} ${plural(S.cfg.cases.periodDays, ["день", "дня", "дней"])}` }));
+    }
+    shownEarly = isEarly(it);
+    sec.append(it.node);
+  };
+  for (const it of head) append(it);
+  if (hidden) {
+    sec.append(h("button", {
+      type: "button", class: "more", text: `Показать ещё ${Math.min(TL_STEP, hidden)} ранних`,
+      onclick: () => { S.tlLimit += TL_STEP; renderCard(); },
+    }));
+    shownEarly = null;
+  }
+  for (const it of tail) append(it);
+}
+
+const isEarly = (it) => S.since != null && it.at < S.since;
 
 function renderCard() {
   const card = $("card");
@@ -275,14 +336,28 @@ function renderCard() {
       onclick: () => select(null), text: "×" })));
 
   const scroll = h("div", { class: "card-scroll" });
+  const sys = c.joinedBy.system ? S.systems.find((s) => s.email === c.joinedBy.system.email) : null;
   const joined = [];
   if (c.joinedBy.thread) joined.push(whyChip("одна ветка: References", "src"));
   if (c.joinedBy.outlook) joined.push(whyChip("одна беседа Outlook: Thread-Index", "src"));
   if (c.joinedBy.meeting) joined.push(whyChip("письма об одной встрече: UID", "src"));
+  if (c.joinedBy.system) {
+    joined.push(whyChip(c.joinedBy.system.object
+      ? `письма системы «${c.joinedBy.system.name}» об одном объекте: ${c.joinedBy.system.object}`
+      : `письма системы «${c.joinedBy.system.name}» с одной темой`, "src"));
+  }
   if (!joined.length) joined.push(whyChip("одно письмо", "src"));
   scroll.append(h("section", { class: "sec" },
     h("h3", {}, icon("i-branch", 12), " Почему это одно дело"),
     h("div", { style: "display: flex; flex-wrap: wrap; gap: 4px;" }, joined),
+    c.startedBefore ? h("div", { style: "margin-top: 8px; font-size: var(--fs-xs); color: var(--c-text-2);",
+      text: `Дело началось ${day(c.firstAt)}, раньше показываемого периода: ранние письма подняты из ящика.` }) : null,
+    sys ? h("div", { style: "margin-top: 8px; font-size: var(--fs-xs); color: var(--c-text-2);" },
+      `Система «${sys.name}» — ${sys.why}. `,
+      sys.cases.length > 1
+        ? h("button", { type: "button", class: "more", onclick: () => filterBySystem(sys),
+          text: `Другие дела этой системы: ${sys.cases.length - 1}` })
+        : null) : null,
     linked.length ? h("div", { style: "margin-top: 8px; font-size: var(--fs-xs); color: var(--c-text-2);" },
       "Связано с: ", ...linked.map((x, i) => h("span", {},
         i ? ", " : "", h("button", { type: "button", class: "more", onclick: () => select(x.other.id), text: `«${x.other.title}»` }),
@@ -291,22 +366,25 @@ function renderCard() {
       text: "Поручения, сроки и состояния появятся, когда будет подключена модель." })));
 
   const tl = timeline(c);
-  const tlSec = h("section", { class: "sec" }, h("h3", { text: `Хронология — ${tl.length} ${plural(tl.length, ["запись", "записи", "записей"])}` }));
-  for (const it of tl.slice(0, S.tlLimit)) tlSec.append(it.node);
-  if (tl.length > S.tlLimit) {
-    tlSec.append(h("button", { type: "button", class: "more", text: `Показать ещё ${Math.min(TL_STEP, tl.length - S.tlLimit)}`,
-      onclick: () => { S.tlLimit += TL_STEP; renderCard(); } }));
-  }
+  const tlSec = h("section", { class: "sec" },
+    h("h3", { text: `Хронология — ${tl.length} ${plural(tl.length, ["запись", "записи", "записей"])}, от первой к последней` }));
+  timelineSection(tl, tlSec);
   scroll.append(tlSec);
 
   if (c.people.length) {
     const sec = h("section", { class: "sec" }, h("h3", { text: `Участники — ${c.people.length}` }));
     for (const p of c.people.slice(0, 12)) {
+      // Должность и подразделение — из адресной книги, по одному запросу с
+      // паузой и только для открытой карточки: каталог отвечает не сразу и
+      // нагружать его списком дел нельзя.
+      const level = h("div", { class: "tl-sub" });
+      if (!p.system) showLevel(p, level);
       sec.append(h("div", { class: "person" },
         h("span", { class: "face", text: initials(p.name, p.email) }),
         h("span", { style: "flex-grow: 1; min-width: 0;" },
-          h("div", { style: "font-size: var(--fs-sm);", text: p.name || p.email }),
-          h("div", { class: "tl-sub", text: `${p.email} · писал ${p.wrote}, в адресатах ${p.letters - p.wrote}` }))));
+          h("div", { style: "font-size: var(--fs-sm);", text: (p.name || p.email) + (p.system ? " · система" : "") }),
+          h("div", { class: "tl-sub", text: `${p.email} · писал ${p.wrote}, в адресатах ${p.letters - p.wrote}` }),
+          level)));
     }
     if (c.people.length > 12) sec.append(h("div", { class: "tl-sub", text: `и ещё ${c.people.length - 12}` }));
     scroll.append(sec);
@@ -338,7 +416,9 @@ function renderOverlay(total, shown) {
     box.hidden = false; box.removeAttribute("data-soft");
     box.textContent = "";
     box.append(h("b", { text: "Дел пока нет" }),
-      h("span", { text: "Письма за последние 30 дней ещё разбираются. Граф будет расти по мере сбора." }));
+      h("span", { text: `Письма за последние ${S.cfg.cases.periodDays} ` +
+        `${plural(S.cfg.cases.periodDays, ["день", "дня", "дней"])} ещё разбираются. ` +
+        "Граф будет расти по мере сбора." }));
   } else if (total > shown) {
     box.hidden = false; box.setAttribute("data-soft", "true");
     box.textContent = "";
@@ -479,6 +559,27 @@ async function send(cmd, extra = {}) {
   }
 }
 
+/**
+ * Должность и подразделение участника из каталога — когда ответит. Ошибка
+ * каталога карточку не ломает: строка просто останется пустой.
+ */
+async function showLevel(person, el) {
+  try {
+    const level = await dir.level(person.email);
+    if (!level?.found) return;
+    const text = [level.title, level.department].filter(Boolean).join(" · ");
+    if (text) el.textContent = text;
+  } catch { /* каталог недоступен — строки просто не будет */ }
+}
+
+/** Показать в списке только дела одной системы: поиск по её адресу. */
+function filterBySystem(sys) {
+  S.query = sys.email;
+  S.filter = "all";
+  $("q").value = sys.email;
+  render();
+}
+
 const openLetter = (id) => send("letter.open", { id });
 const replyLetter = (id) => send("letter.reply", { id });
 const openSettings = () => browser.runtime.openOptionsPage();
@@ -510,6 +611,10 @@ async function poll() {
 
 const graph = new CaseGraph($("graph"), {
   onSelect: (id) => select(id),
+  onPickSystem: (email) => {
+    const sys = S.systems.find((s) => s.email === email);
+    if (sys) filterBySystem(sys);
+  },
   onTip: (tip) => {
     const el = $("tip");
     el.hidden = !tip;
@@ -559,6 +664,7 @@ browser.runtime.onMessage.addListener((msg) => {
 
 S.cfg = await settings.load();
 S.me = await myAddresses(browser, S.cfg.me.aliases);
+const dir = new DirectoryLookup({ browser, db, cfg: S.cfg.directory });
 if (S.cfg.trueconf.server) {
   S.tcSession = await new TrueConfApi({ cfg: S.cfg.trueconf, store: db.meta }).session().catch(() => null);
 }

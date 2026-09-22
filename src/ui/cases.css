@@ -242,6 +242,9 @@ button{font:inherit;color:inherit}
 .tl-body{min-width:0;flex-grow:1}
 .tl-title{font-size:var(--fs-sm);font-weight:var(--fw-med);color:var(--c-text)}
 .tl-sub{font-size:var(--fs-xs);color:var(--c-text-2);margin-top:1px}
+.tl-sep{display:flex;align-items:center;gap:var(--sp-2);margin:var(--sp-2) 0;font-size:var(--fs-xs);
+  color:var(--c-text-2);text-transform:uppercase;letter-spacing:.04em}
+.tl-sep::before,.tl-sep::after{content:"";flex-grow:1;height:1px;background:var(--c-border)}
 .tl[data-fresh="true"]{animation:fresh 1.6s var(--e-out)}
 @keyframes fresh{from{background:var(--st-new-bg)}to{background:transparent}}
 .person{display:flex;align-items:center;gap:var(--sp-2);padding:5px 0}

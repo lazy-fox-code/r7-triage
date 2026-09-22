@@ -91,6 +91,10 @@ export async function checkModel({ llm, fetch, samples = SAMPLES }) {
         label: r.verdict?.label ?? null,
         json: !r.error,
         schema: schemaOk(r.verdict),
+        // Имена полей ответа — чтобы по отчёту было видно, отвечает ли
+        // модель по нашей схеме или по своей. Выдуманные письма, значений
+        // в отчёте нет, только названия.
+        keys: r.verdict && typeof r.verdict === "object" ? Object.keys(r.verdict).slice(0, 12) : [],
         reasoning: r.reasoning,
         ms: r.ms,
       };
@@ -113,6 +117,7 @@ export async function checkModel({ llm, fetch, samples = SAMPLES }) {
     schemaOk: answered.filter((r) => r.schema).length,
     correct: answered.filter((r) => r.label === r.expect).length,
     reasoningDetected: answered.some((r) => r.reasoning),
+    answerFields: [...new Set(answered.flatMap((r) => r.keys ?? []))].sort(),
     latencyMs: times.length ? {
       min: times[0],
       median: times[Math.floor(times.length / 2)],

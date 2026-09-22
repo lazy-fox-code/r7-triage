@@ -135,6 +135,44 @@ export async function getAllFromIndex(store, index, query, limit) {
 }
 
 /**
+ * Много выборок за одну транзакцию. Сборка дел поднимает ранние письма
+ * сотнями ключей, и транзакция на каждый ключ обошлась бы дороже самих
+ * чтений.
+ *
+ * @param {string[]} keys ключи записей (`getMany`) или значения индекса
+ * @returns {Promise<object[]>} найденные записи, в одном списке
+ */
+export async function getMany(store, keys) {
+  return manyRequests(store, keys, (s, key) => s.get(key));
+}
+
+export async function getAllFromIndexMany(store, index, values, limit) {
+  return manyRequests(store, values,
+    (s, v) => s.index(index).getAll(IDBKeyRange.only(v), limit));
+}
+
+async function manyRequests(store, values, fn) {
+  if (!values.length) return [];
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    const t = db.transaction(store, "readonly");
+    const s = t.objectStore(store);
+    const out = [];
+    for (const v of values) {
+      const req = fn(s, v);
+      req.onsuccess = () => {
+        const r = req.result;
+        if (Array.isArray(r)) out.push(...r);
+        else if (r !== undefined) out.push(r);
+      };
+    }
+    t.oncomplete = () => resolve(out);
+    t.onabort = () => reject(t.error ?? new Error("транзакция прервана"));
+    t.onerror = () => reject(t.error);
+  });
+}
+
+/**
  * Чтение и запись одной записи в одной транзакции. Проход обогащения
  * дописывает поля к письму, и перечитать его нужно в той же транзакции:
  * иначе можно затереть то, что успел дописать проход по ящику (например,

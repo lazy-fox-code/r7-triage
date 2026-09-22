@@ -51,8 +51,10 @@ const tc = await import(`${SRC}trueconf-api.js`);
 const { Semaphore } = await import(`${SRC}llm.js`);
 const { checkModel, SAMPLES } = await import(`${SRC}model-check.js`);
 const { checkDirectory } = await import(`${SRC}directory-check.js`);
+const { DirectoryLookup, levelOf } = await import(`${SRC}directory.js`);
 const report = await import(`${SRC}check-report.js`);
-const { buildCases, diffCases, displaySubject } = await import(`${SRC}cases.js`);
+const { buildCases, diffCases, displaySubject, loadCaseRows, objectId, subjectTemplate } = await import(`${SRC}cases.js`);
+const { SenderProfiler, actionHint } = await import(`${SRC}senders.js`);
 const trial = await import(`${SRC}trial.js`);
 // В релизной сборке дата впечена (см. scripts/build.mjs), и якорь срока — она,
 // а не установка. Тесты срока подстраиваются под текущий якорь.
@@ -771,31 +773,84 @@ test("гейт: у решения есть причина и цитата, мо�
   equal(gate(derive(base, me), cfg).outcome, "model", "адресное письмо — в модель");
 });
 
-test("замер гейта считает долю снятых писем по всей базе", async () => {
+test("замер отсева: заголовки рассылок, профиль отправителя и признак действия", async () => {
   const tb = new FakeThunderbird();
   tb.addAccount("account1", "Ящик", ["me@example.ru"]);
   const inbox = tb.addFolder("account1", "/INBOX", { name: "Входящие", type: "inbox" });
+  // Рассылка с заголовком — старое правило работает как работало.
   for (let i = 0; i < 6; i++) {
-    tb.addMessage(inbox, { ...msg(`bulk${i}`, 20 + i), headers: { "List-Id": "<news.example.ru>" } });
+    tb.addMessage(inbox, { ...msg(`Дайджест ${i}`, 20 + i), author: "news@example.ru",
+      headers: { "List-Id": "<news.example.ru>" } });
   }
-  for (let i = 0; i < 2; i++) tb.addMessage(inbox, msg(`direct${i}`, 10 + i));
-  tb.addMessage(inbox, { ...msg("mine", 5), author: "me@example.ru" });
+  // Система уведомлений без единого заголовка рассылки: узнаётся по себе.
+  for (let i = 1; i <= 5; i++) {
+    tb.addMessage(inbox, { ...msg(`Инцидент INC00${i} зарегистрирован`, 15 + i), author: "sd@example.ru" });
+  }
+  // Она же, но от вас ждут действия: такое письмо остаётся модели.
+  tb.addMessage(inbox, { ...msg("Инцидент INC006 назначен вам", 12), author: "sd@example.ru" });
+  // Живой коллега.
+  tb.addMessage(inbox, { ...msg("Договор с подрядчиком", 11) });
+  tb.addMessage(inbox, { ...msg("Смета на ремонт", 10) });
+  tb.addMessage(inbox, { ...msg("Ответ коллеге", 5), author: "me@example.ru" });
 
   await scanner(tb).run("full");
   await enricher(tb).run();
 
   const report = await gateReport({ db, me: new Set(["me@example.ru"]), cfg: DEFAULTS.gate });
-  equal(report.total, 9, "писем всего");
+  equal(report.total, 15, "писем всего");
   equal(report.own, 1, "моих");
-  equal(report.noise, 6, "шума");
-  equal(report.model, 2, "в модель");
-  equal(report.removedShare, 0.75, "доля снятых гейтом");
-  equal(report.reasons["noise: рассылка"], 6, "разбивка по причинам");
+  equal(report.noise, 6, "шум по заголовку рассылки");
+  equal(report.info, 5, "уведомления системы сняты без модели");
+  equal(report.model, 3, "в модель: два письма коллеги и одно с признаком действия");
+  equal(Math.round(report.removedShare * 100), 79, "доля снятых без модели, %");
+  equal(report.reasons["info: уведомление информационной системы"], 5, "разбивка по причинам");
+  // И служба поддержки, и адрес рассылки пишут одинаково: много, по
+  // шаблону, без ответа. Что рассылка ещё и с заголовком List-Id — видно
+  // раньше, по заголовку, поэтому её письма остаются шумом, а не
+  // информированием.
+  equal(report.senders.system, 2, "оба односторонних отправителя узнаны");
+  equal(report.senders.person, 1, "живой коллега остался обычным отправителем");
   equal(report.samples, undefined, "без запроса выборки писем нет");
+
+  const profiles = await db.getAll("people");
+  const sd = profiles.find((p) => p.email === "sd@example.ru");
+  equal(sd.kind, "system", "профиль отправителя сохранён в people");
+  assert(sd.why.includes("темы повторяются"), "видно, почему это система");
 
   const withSample = await gateReport({ db, me: new Set(["me@example.ru"]), cfg: DEFAULTS.gate, sampleSize: 4 });
   equal(withSample.samples.noise.length, 4, "выборка отсеянных ограничена размером");
   assert(withSample.samples.noise.every((x) => x.reason === "рассылка" && x.subject), "в выборке причина и тема");
+  assert(withSample.samples.info.some((x) => x.quote.includes("ни одного ответа")),
+    "в цитате — на чём основано решение по отправителю");
+});
+
+test("профиль отправителя: ваши письма отменяют вердикт «система»", async () => {
+  const me = new Set(["me@example.ru"]);
+  const notifications = [];
+  for (let i = 1; i <= 6; i++) {
+    notifications.push(letter(`n${i}`, { from: "hr@example.ru", fromName: "Кадры",
+      subject: `Табель за 0${i}.2026`, ageH: 100 - i, threadId: `t${i}` }));
+  }
+  const alone = new SenderProfiler(me);
+  for (const row of notifications) alone.add(row);
+  const asSystem = alone.profiles(DEFAULTS.senders).get("hr@example.ru");
+  equal(asSystem.kind, "system", "одностороннее вещание по шаблону — система");
+  equal(asSystem.dialogThreads, 0, "разговора не было");
+
+  // Те же письма, но в одной из веток ответил я — это уже переписка.
+  const talked = new SenderProfiler(me);
+  for (const row of notifications) talked.add(row);
+  talked.add(letter("reply", { from: "me@example.ru", to: ["hr@example.ru"],
+    subject: "RE: Табель за 03.2026", threadId: "t3" }));
+  const asPerson = talked.profiles(DEFAULTS.senders).get("hr@example.ru");
+  equal(asPerson.kind, "person", "вы отвечали — значит, не вещание");
+  equal(asPerson.dialogThreads, 1, "ветка с вашим ответом посчитана");
+  assert(asPerson.iWrote, "видно, что вы писали на этот адрес");
+
+  equal(actionHint("Инцидент INC001 назначен вам", DEFAULTS.gate.actionWords), "назначен",
+    "признак действия в теме находится");
+  equal(actionHint("Инцидент INC001 закрыт", DEFAULTS.gate.actionWords), null,
+    "без признака действия тема чистая");
 });
 
 test("свои адреса: личности учётных записей и алиасы из настроек", async () => {
@@ -1107,6 +1162,58 @@ test("проверка каталога: книги, поля карточек, 
   assert(!/Иванов|ivanov|Начальник|закупок/.test(text), "в сводке только названия полей");
 });
 
+test("каталог: локальные книги вперёд, GAL по одному запросу, найденное кэшируется", async () => {
+  await fresh();
+  const calls = { local: 0, remote: 0 };
+  const card = (email, extra = "") => ({ properties: {
+    vCard: `BEGIN:VCARD\r\nVERSION:4.0\r\nFN:Иванов Иван\r\nTITLE:Начальник отдела\r\n` +
+      `ORG:ООО Пример;Отдел закупок\r\nEMAIL:${email}\r\n${extra}END:VCARD`,
+  } });
+  const browserStub = { contacts: {
+    async quickSearch(q) {
+      if (q.includeRemote) {
+        calls.remote++;
+        return q.searchString === "ivanov@example.ru" ? [card("ivanov@example.ru")] : [];
+      }
+      calls.local++;
+      return q.searchString === "local@example.ru" ? [card("local@example.ru")] : [];
+    },
+  } };
+  const cfg = { ...DEFAULTS.directory, pauseMs: 0 };
+  const dir = new DirectoryLookup({ browser: browserStub, db, cfg });
+
+  const known = await dir.level("ivanov@example.ru");
+  equal(known.title, "Начальник отдела", "должность из карточки");
+  equal(known.department, "Отдел закупок", "подразделение из ORG");
+  equal(known.source, "remote", "нашлось в удалённой книге");
+  equal(calls.local, 1, "сначала спрошены локальные книги");
+  equal(calls.remote, 1, "в GAL один запрос");
+
+  await dir.level("ivanov@example.ru");
+  equal(calls.remote, 1, "повторный вопрос отвечает из кэша");
+  equal((await db.get("people", "ivanov@example.ru")).directory.title, "Начальник отдела",
+    "кэш лежит в people и переживёт перезапуск");
+
+  const local = await dir.level("local@example.ru");
+  equal(local.source, "local", "локальная книга отвечает без запроса в домен");
+  equal(calls.remote, 1, "ради локального адреса в домен не ходили");
+
+  const stranger = await dir.level("unknown@example.com");
+  equal(stranger.found, false, "неизвестный адрес помечен как ненайденный");
+  await dir.level("unknown@example.com");
+  equal(calls.remote, 2, "ненайденное тоже кэшируется — домен не дёргаем повторно");
+
+  // Потолок на сеанс: дальше расширение каталог не спрашивает.
+  const capped = new DirectoryLookup({
+    browser: browserStub, db, cfg: { ...cfg, maxPerSession: 0 } });
+  const skipped = await capped.level("someone@example.ru");
+  equal(skipped.found, false, "потолок запросов на сеанс соблюдается");
+  equal(calls.remote, 2, "лишних запросов к домену нет");
+
+  equal(levelOf({ properties: { JobTitle: "Инженер", Department: "ИТ" } }).title, "Инженер",
+    "поля карточки Thunderbird читаются наравне с vCard");
+});
+
 test("отчёт о проверке: метрики по стадиям, ручные отметки, секретов нет", async () => {
   const tb = new FakeThunderbird();
   tb.addAccount("account1", "Ящик", ["me@example.ru"]);
@@ -1239,6 +1346,87 @@ test("дела: разница между сборками — новое дел
   equal(ev.filter((e) => e.kind === "case").length, 1, "одно новое дело");
   equal(before[0].id, after.find((c) => c.title === "Договор").id, "id дела не меняется с приходом писем");
   equal(displaySubject("RE: FW: Отв: Договор"), "Договор", "название дела без приставок");
+});
+
+test("дела: дело собирается с первого письма, а не с границы периода", async () => {
+  await fresh();
+  const me = new Set(["me@example.ru"]);
+  const since = Date.now() - 30 * DAYS;
+  await db.putMany("messages", [
+    // Ветка началась два месяца назад, движение — вчера.
+    letter("root", { subject: "Договор с подрядчиком", ageH: 24 * 60 }),
+    letter("r1", { subject: "RE: Договор с подрядчиком", ageH: 24 * 45, threadId: "m:root@example.ru",
+      thread: { root: "m:root@example.ru", parent: "m:root@example.ru", index: null } }),
+    letter("r2", { subject: "RE: Договор с подрядчиком", ageH: 20, threadId: "m:root@example.ru",
+      thread: { root: "m:root@example.ru", parent: "m:r1@example.ru", index: null }, read: false }),
+    // Переписка, закончившаяся до периода: поднимать её незачем.
+    letter("old", { subject: "Прошлогодняя смета", ageH: 24 * 70 }),
+  ]);
+
+  const loaded = await loadCaseRows(db, { since, me, cfg: DEFAULTS.cases });
+  equal(loaded.history.added, 2, "подняты два ранних письма ветки");
+  assert(!loaded.rows.some((r) => r.subject === "Прошлогодняя смета"), "чужая старая переписка не поднята");
+
+  const { cases } = buildCases(loaded.rows, { me, cfg: DEFAULTS.cases, systems: loaded.systems, since });
+  equal(cases.length, 1, "показано дело, в котором было движение");
+  const c = cases[0];
+  equal(c.counts.mail, 3, "в деле вся ветка, включая ранние письма");
+  equal(c.id, "c:m:root@example.ru", "дело опознаётся по первому письму ветки");
+  equal(c.letters[0].why, "начало ветки", "первое письмо — начало ветки");
+  assert(c.startedBefore, "видно, что дело началось раньше периода");
+  equal(c.early, 2, "два письма подняты как история");
+  equal(c.unread, 1, "непрочитанное считается только в периоде");
+  assert(c.firstAt < since && c.lastAt > since, "дело идёт от первого письма к последнему");
+
+  const alone = buildCases([letter("old2", { subject: "Прошлое", ageH: 24 * 60 })], { me, since });
+  equal(alone.cases.length, 0, "дело без движения за период не показывается");
+});
+
+test("дела: письма системы склеиваются по номеру объекта, дела системы связаны между собой", async () => {
+  const me = new Set(["me@example.ru"]);
+  const sd = { from: "noreply@sd.example.ru", fromName: "Service Desk" };
+  const rows = [
+    letter("i1", { ...sd, subject: "Инцидент INC0012345 зарегистрирован", ageH: 30 }),
+    letter("i2", { ...sd, subject: "INC0012345: назначен исполнитель", ageH: 20 }),
+    letter("i3", { ...sd, subject: "Инцидент INC0012345 решён", ageH: 10, read: false }),
+    letter("i4", { ...sd, subject: "Инцидент INC0012400 зарегистрирован", ageH: 5 }),
+  ];
+  const { cases, systems } = buildCases(rows, { me, cfg: DEFAULTS.cases });
+  equal(cases.length, 2, "два инцидента — два дела, а не одна куча писем");
+  const inc = cases.find((c) => c.counts.mail === 3);
+  equal(inc.joinedBy.system.object, "INC-0012345", "склеено по номеру инцидента");
+  equal(inc.letters[0].why, "первое письмо о INC-0012345", "у первого письма — начало дела");
+  equal(inc.letters[1].why, "«Service Desk»: тот же номер INC-0012345", "почему письмо в деле");
+  equal(systems.length, 1, "одна система");
+  equal(systems[0].cases.length, 2, "оба её дела связаны с ней");
+  assert(systems[0].why.includes("noreply"), "сказано, почему отправитель — система");
+  assert(inc.people[0].system, "в участниках система помечена");
+});
+
+test("дела: система узнаётся по поведению, а обычный отправитель — нет", async () => {
+  const me = new Set(["me@example.ru"]);
+  const robot = [];
+  for (let i = 1; i <= 6; i++) {
+    robot.push(letter(`rep${i}`, { from: "svc@corp.example.ru", fromName: "Мониторинг",
+      subject: `Отчёт о доступности за 0${i}.09.2026`, ageH: 100 - i }));
+  }
+  const built = buildCases(robot, { me, cfg: DEFAULTS.cases });
+  equal(built.systems.length, 1, "система узнана без списка адресов: шаблонные темы, ни одного ответа");
+  equal(built.cases.length, 1, "серия отчётов — одно дело");
+  equal(built.cases[0].counts.mail, 6, "все письма серии вместе");
+  equal(built.cases[0].joinedBy.system.object, null, "склеено темой, номера объекта в ней нет");
+
+  // Тот же объём писем от живого человека, которому я отвечал, системой не считается.
+  const human = [letter("mine", { from: "me@example.ru", to: ["petrov@example.ru"], subject: "Ответ" })];
+  for (let i = 1; i <= 6; i++) {
+    human.push(letter(`p${i}`, { from: "petrov@example.ru", fromName: "Петров",
+      subject: `Отчёт о доступности за 0${i}.09.2026`, ageH: 100 - i }));
+  }
+  equal(buildCases(human, { me, cfg: DEFAULTS.cases }).systems.length, 0,
+    "отправитель, которому вы писали, системой не считается");
+  equal(objectId("Заявка № 12345 от 21.09.2026"), "№ 12345", "номер заявки узнаётся");
+  equal(objectId("Протокол совещания от 18.09"), null, "дата номером объекта не считается");
+  equal(subjectTemplate("RE: Отчёт за 21.09.2026"), "отчет за #", "тема с точностью до чисел");
 });
 
 // --- вспомогательное -----------------------------------------------------

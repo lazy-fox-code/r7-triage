@@ -9,9 +9,14 @@ const SCAN_NUM = ["recentDays", "idleSeconds", "archiveRecheckDays",
   "targetPerWindow", "initialWindowDays", "minWindowDays",
   "maxWindowDays", "overlapDays", "floorYear", "throttleMs"];
 const SCAN_BOOL = ["archiveOnIdle", "autoResume"];
+const CASES_NUM = ["periodDays", "newDays", "historyLimit"];
+const SENDERS_NUM = ["minLetters", "broadcastRecipients"];
+const DIR_NUM = ["cacheDays", "pauseMs", "maxPerSession"];
+const DIR_BOOL = ["enabled", "includeRemote"];
 const MB = 1048576;
 
 const list = (s) => s.split(",").map((x) => x.trim()).filter(Boolean);
+const up = (k) => k[0].toUpperCase() + k.slice(1);
 
 async function fill() {
   const cfg = await settings.load();
@@ -28,6 +33,13 @@ async function fill() {
   $("enrichMaxSizeMb").value = Math.round(cfg.enrich.maxSizeBytes / MB);
   $("enrichThrottleMs").value = cfg.enrich.throttleMs;
   $("massCcRecipients").value = cfg.gate.massCcRecipients;
+  for (const k of CASES_NUM) $(`cases${up(k)}`).value = cfg.cases[k];
+  for (const k of SENDERS_NUM) $(`senders${up(k)}`).value = cfg.senders[k];
+  $("sendersSystemSenders").value = cfg.senders.systemSenders.join(", ");
+  $("sendersTemplateSharePct").value = Math.round(cfg.senders.templateShare * 100);
+  $("gateActionWords").value = cfg.gate.actionWords.join(", ");
+  for (const k of DIR_NUM) $(`dir${up(k)}`).value = cfg.directory[k];
+  for (const k of DIR_BOOL) $(`dir${up(k)}`).checked = cfg.directory[k];
   $("aliases").value = cfg.me.aliases.join(", ");
   $("tcHosts").value = cfg.trueconf.hosts.join(", ");
 }
@@ -81,7 +93,26 @@ $("save").addEventListener("click", async () => {
     maxSizeBytes: Number($("enrichMaxSizeMb").value) * MB,
     throttleMs: Number($("enrichThrottleMs").value),
   });
-  await settings.save("gate", { massCcRecipients: Number($("massCcRecipients").value) });
+  await settings.save("gate", {
+    massCcRecipients: Number($("massCcRecipients").value),
+    actionWords: list($("gateActionWords").value).map((x) => x.toLowerCase()),
+  });
+
+  const cases = {};
+  for (const k of CASES_NUM) cases[k] = Number($(`cases${up(k)}`).value);
+  await settings.save("cases", cases);
+
+  const senders = {
+    systemSenders: list($("sendersSystemSenders").value).map((x) => x.toLowerCase()),
+    templateShare: Number($("sendersTemplateSharePct").value) / 100,
+  };
+  for (const k of SENDERS_NUM) senders[k] = Number($(`senders${up(k)}`).value);
+  await settings.save("senders", senders);
+
+  const directory = {};
+  for (const k of DIR_NUM) directory[k] = Number($(`dir${up(k)}`).value);
+  for (const k of DIR_BOOL) directory[k] = $(`dir${up(k)}`).checked;
+  await settings.save("directory", directory);
   await settings.save("me", { aliases: list($("aliases").value) });
   // Только имя сервера: схему и путь, если их вставили вместе с адресом, отрезаем.
   await settings.save("trueconf", {

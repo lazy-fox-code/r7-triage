@@ -26,7 +26,7 @@ import { Scanner } from "./scan.js";
 import { Enricher } from "./enrich.js";
 import { myAddresses } from "./me.js";
 import { gateReport } from "./report.js";
-import { buildCases } from "./cases.js";
+import { buildCases, loadCaseRows } from "./cases.js";
 import { findHeader } from "./locate.js";
 import * as settings from "./settings.js";
 import * as trial from "./trial.js";
@@ -39,7 +39,6 @@ const ENRICH = "enrich";
 const ENRICH_NOW = "enrich-now";
 const CASES_PAGE = "src/ui/cases.html";
 const CASES_BUTTON = "cases";
-const CASES_DAYS = 30;
 // Идут только в простое и уступают вернувшемуся пользователю.
 const IDLE_ONLY = new Set([ARCHIVE, ENRICH]);
 const PROGRESS_THROTTLE_MS = 500;
@@ -298,7 +297,7 @@ async function runGateReport() {
   const cfg = await settings.load();
   const me = await myAddresses(browser, cfg.me.aliases);
   // Выборка отсеянных — для проверки глазами на странице состояния.
-  const report = await gateReport({ db, me, cfg: cfg.gate, sampleSize: 20 });
+  const report = await gateReport({ db, me, cfg: cfg.gate, sendersCfg: cfg.senders, sampleSize: 20 });
   report.myAddresses = me.size;
   await db.meta.set("gate:report", report);
   return report;
@@ -336,8 +335,11 @@ function scheduleBadge() {
 async function updateBadge() {
   const cfg = await settings.load();
   const me = await myAddresses(browser, cfg.me.aliases);
-  const rows = await db.messagesInDateRange(Date.now() - CASES_DAYS * DAY, null);
-  const { cases } = buildCases(rows, { me, gateCfg: cfg.gate });
+  const since = Date.now() - cfg.cases.periodDays * DAY;
+  const { rows, systems } = await loadCaseRows(db,
+    { since, me, cfg: cfg.cases, sendersCfg: cfg.senders });
+  const { cases } = buildCases(rows,
+    { me, gateCfg: cfg.gate, cfg: cfg.cases, sendersCfg: cfg.senders, systems, since });
   const fresh = cases.filter((c) => c.state === "new").length;
   try {
     await browser.spacesToolbar?.updateButton(CASES_BUTTON, {

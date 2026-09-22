@@ -6,8 +6,14 @@
 // правки правил или своих адресов замер сразу показывает новую картину, без
 // повторного прохода. Разбивка по причинам нужна, чтобы увидеть правило,
 // которое на живом ящике срабатывает слишком широко.
+//
+// Перед замером обновляются профили отправителей: половина правил решает по
+// тому, кто пишет и отвечали ли вы ему, а это считается по всему ящику
+// (`senders.js`). Профили остаются в `people` — их же берёт вкладка «Дела».
 
 import { derive, gate } from "./features.js";
+import { profileSenders } from "./senders.js";
+import { DEFAULTS } from "./settings.js";
 
 /**
  * @param {object} deps.db   модуль хранилища
@@ -17,11 +23,18 @@ import { derive, gate } from "./features.js";
  *   класса отложить для просмотра глазами. Выборка показывается только на
  *   странице состояния и в отчёт о проверке не попадает: в ней темы писем.
  */
-export async function gateReport({ db, me, cfg, batch = 2000, sampleSize = 0, onProgress = () => {} }) {
+export async function gateReport({
+  db, me, cfg, sendersCfg = DEFAULTS.senders, senders = null,
+  batch = 2000, sampleSize = 0, onProgress = () => {},
+}) {
+  const profiled = senders
+    ? { profiles: senders, counts: null }
+    : await profileSenders({ db, me, cfg: sendersCfg, batch, onProgress });
   const out = {
     at: Date.now(),
     total: 0, own: 0, pending: 0, model: 0, noise: 0, info: 0,
     reasons: {},
+    senders: profiled.counts,
   };
   // Равномерная случайная выборка по всему ящику (reservoir sampling):
   // первые письма ящика не должны вытеснять остальные.
@@ -30,7 +43,7 @@ export async function gateReport({ db, me, cfg, batch = 2000, sampleSize = 0, on
 
   await db.pages("messages", batch, (rows) => {
     for (const row of rows) {
-      const g = gate(derive(row, me), cfg);
+      const g = gate(derive(row, me, profiled.profiles), cfg);
       out.total++;
       out[g.outcome]++;
       if (g.label) {

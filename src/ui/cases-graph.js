@@ -31,6 +31,7 @@ const GLYPH = {
   chat: { w: 1.8, p: ["M20 12.3c0 3.5-3.6 6.3-8 6.3-.9 0-1.8-.1-2.6-.4L4.5 19.9l1.4-3.2A6.5 6.5 0 0 1 4 12.3C4 8.8 7.6 6 12 6s8 2.8 8 6.3z"] },
   clip: { w: 1.8, p: ["M19.4 11.5 12.3 18.5a4.2 4.2 0 1 1-6-6l7.2-7.1a2.75 2.75 0 0 1 3.9 3.9l-7.2 7.1a1.35 1.35 0 0 1-1.9-1.9l6.5-6.5"] },
   person: { w: 1.8, p: ["M12 11.6a3.3 3.3 0 1 0 0-6.6 3.3 3.3 0 0 0 0 6.6", "M5.2 19.8c1-3.4 3.7-5.2 6.8-5.2s5.8 1.8 6.8 5.2"] },
+  system: { w: 1.7, p: ["M3.6 4.8h16.8v5.4H3.6z", "M3.6 13.8h16.8v5.4H3.6z", "M6.8 7.5h3.2", "M6.8 16.5h3.2", "M17 7.5h.6", "M17 16.5h.6"] },
 };
 
 const TOKENS = ["--st-new", "--st-work", "--st-wait", "--st-over", "--st-done", "--st-info", "--st-stale",
@@ -38,7 +39,8 @@ const TOKENS = ["--st-new", "--st-work", "--st-wait", "--st-over", "--st-done", 
   "--g-node-stroke", "--c-accent", "--c-text-2", "--c-surface", "--c-border-strong"];
 
 const KIND_NAME = { deal: "Дело", branch: "Переписка", child: "Элемент", meet: "Встреча", task: "Задача",
-  conf: "Конференция TrueConf", chat: "Беседа TrueConf", files: "Вложения", person: "Контакт" };
+  conf: "Конференция TrueConf", chat: "Беседа TrueConf", files: "Вложения", person: "Контакт",
+  system: "Информационная система" };
 
 export function plural(n, f) {
   const m = n % 100;
@@ -93,11 +95,11 @@ function elementsOf(c, allPeople) {
 
 function childrenOf(el, c) {
   if (el.t === "branch") {
-    return c.letters.slice(-9).reverse().map((l) => ({ g: "mail", label: l.subject || "(без темы)",
+    return c.letters.slice(-9).map((l) => ({ g: "mail", label: l.subject || "(без темы)",
       why: l.why, sub: shortDate(l.date), letterId: l.id }));
   }
   if (el.t === "files") {
-    return c.files.slice(-9).reverse().map((f) => ({ g: "clip", label: f.name || "вложение",
+    return c.files.slice(-9).map((f) => ({ g: "clip", label: f.name || "вложение",
       why: "вложение письма дела", sub: shortDate(f.date), letterId: f.messageId }));
   }
   return [];
@@ -123,7 +125,7 @@ export class CaseGraph {
     this.hoverId = null;
     this.alpha = 1;
     this.userMoved = false;
-    this.data = { cases: [], cross: [], selected: null, scope: "all", allPeople: false, expanded: new Set() };
+    this.data = { cases: [], cross: [], systems: [], selected: null, scope: "all", allPeople: false, expanded: new Set() };
     this.byId = new Map();
     this.readTokens();
     this.bindEvents();
@@ -197,6 +199,22 @@ export class CaseGraph {
     const vis = new Set(cases.map((c) => c.id));
     for (const l of cross) {
       if (vis.has(l.a) && vis.has(l.b)) links.push({ a: l.a, b: l.b, kind: l.kind, why: l.why });
+    }
+
+    // Информационная система — общий узел своих дел. Инциденты остаются
+    // разными делами, но видно, что они от одной системы, и она держит их
+    // вместе на графе.
+    if (!focus) {
+      for (const sys of this.data.systems ?? []) {
+        const ids = sys.cases.filter((id) => vis.has(id));
+        if (ids.length < 2) continue;
+        const p = prev[sys.id] || { x: (Math.random() - 0.5) * 420, y: (Math.random() - 0.5) * 420 };
+        nodes.push({ id: sys.id, t: "system", role: "system", g: "system", r: 13, x: p.x, y: p.y,
+          label: sys.name, email: sys.email,
+          why: `${ids.length} ${plural(ids.length, ["дело", "дела", "дел"])} · ${sys.why}`,
+          born: prev[sys.id] ? (prev[sys.id].born || 0) : bornNow });
+        for (const id of ids) links.push({ a: sys.id, b: id, kind: "system", why: "письма одной системы" });
+      }
     }
 
     // В обзоре контакты — только по переключателю и только общие для
@@ -314,7 +332,7 @@ export class CaseGraph {
       const n1 = this.index[l.a];
       const n2 = this.index[l.b];
       if (!n1 || !n2) continue;
-      const want = l.kind === "person" ? 140 : 250;
+      const want = (l.kind === "person" || l.kind === "system") ? 140 : 250;
       const dx = n2.x - n1.x;
       const dy = n2.y - n1.y;
       const d = Math.sqrt(dx * dx + dy * dy) || 0.01;
@@ -374,11 +392,12 @@ export class CaseGraph {
       if (al <= 0.01) continue;
       ctx.globalAlpha = al * (l.kind === "elem" || l.kind === "thread" ? 0.6 : 0.85);
       ctx.beginPath();
-      ctx.setLineDash(l.kind === "meet" ? [6, 4] : l.kind === "conf" ? [0.1, 4.5] : l.kind === "chat" ? [7, 3, 1.5, 3] : []);
+      ctx.setLineDash(l.kind === "meet" ? [6, 4] : l.kind === "conf" ? [0.1, 4.5]
+        : l.kind === "chat" ? [7, 3, 1.5, 3] : l.kind === "system" ? [3, 3] : []);
       ctx.lineCap = l.kind === "conf" ? "round" : "butt";
-      ctx.lineWidth = l.kind === "person" ? 0.6 : l.kind === "elem" ? 1.2 : l.kind === "thread" ? 1 : 1.7;
+      ctx.lineWidth = l.kind === "person" ? 0.6 : l.kind === "system" ? 0.8 : l.kind === "elem" ? 1.2 : l.kind === "thread" ? 1 : 1.7;
       ctx.strokeStyle = (l.kind === "elem" || l.kind === "thread") ? this.col(a.state || "branch")
-        : l.kind === "person" ? T["--g-link-person"] : T["--g-link"];
+        : (l.kind === "person" || l.kind === "system") ? T["--g-link-person"] : T["--g-link"];
       const grow = (l.born && !red) ? Math.min(1, (now - l.born) / 200) : 1;
       ctx.moveTo(a.x, a.y); ctx.lineTo(a.x + (b.x - a.x) * grow, a.y + (b.y - a.y) * grow);
       ctx.stroke();
@@ -423,6 +442,10 @@ export class CaseGraph {
         }
         ctx.fillStyle = n.role === "center" ? T["--g-label"] : T["--g-label-2"];
         ctx.fillText(text, n.x, n.y + R + 7);
+      } else if (n.role === "system") {
+        ctx.font = "10px system-ui";
+        ctx.fillStyle = T["--g-label-2"];
+        ctx.fillText(cut(n.label, 26), n.x, n.y + n.r + 7);
       } else if (n.role === "el" || n.role === "child") {
         ctx.font = (n.role === "el" ? "10px " : "9px ") + "system-ui";
         ctx.fillStyle = T["--g-label-2"];
@@ -455,7 +478,7 @@ export class CaseGraph {
 
   drawChip(ctx, n, grow) {
     const T = this.tokens;
-    const c = n.t === "person" ? T["--c-text-2"] : this.col(n.state);
+    const c = (n.t === "person" || n.t === "system") ? T["--c-text-2"] : this.col(n.state);
     const r = n.r * (0.6 + 0.4 * grow);
     const x = n.x;
     const y = n.y;
@@ -660,6 +683,7 @@ export class CaseGraph {
 
   tipSub(n) {
     const kind = KIND_NAME[n.t] || "Элемент";
+    if (n.t === "system") return `${kind} · ${n.why} · нажмите, чтобы показать только её дела`;
     if (n.t === "deal") {
       const c = n.deal;
       return `${kind} · ${STATES[n.state]?.name ?? ""} · ${c.counts.mail} ${plural(c.counts.mail, ["письмо", "письма", "писем"])}` +
@@ -671,6 +695,7 @@ export class CaseGraph {
 
   pickNode(n) {
     if (n.t === "deal") { this.hooks.onSelect?.(n.id); return; }
+    if (n.t === "system") { this.hooks.onPickSystem?.(n.email); return; }
     if (n.letterId) { this.hooks.onOpenLetter?.(n.letterId); return; }
     if (n.openable) {
       const ex = new Set(this.data.expanded);

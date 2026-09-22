@@ -5,7 +5,7 @@ import * as settings from "../settings.js";
 import * as trial from "../trial.js";
 import { BUILD_DATE_MS } from "../build-info.js";
 import { STAGES, STATUS, collect, renderMarkdown, casesSummary } from "../check-report.js";
-import { buildCases } from "../cases.js";
+import { buildCases, loadCaseRows } from "../cases.js";
 import { gateReport } from "../report.js";
 import { myAddresses } from "../me.js";
 import { checkModel } from "../model-check.js";
@@ -221,16 +221,21 @@ async function refresh() {
   $("status").textContent = "Собираю метрики…";
   const cfg = await settings.load();
   const me = await myAddresses(browser, cfg.me.aliases);
-  const gate = await gateReport({ db, me, cfg: cfg.gate });
+  const gate = await gateReport({ db, me, cfg: cfg.gate, sendersCfg: cfg.senders });
   const session = await new TrueConfApi({ cfg: cfg.trueconf, store: db.meta }).session();
-  const rows = await db.messagesInDateRange(Date.now() - 30 * 86400000, null);
-  const built = buildCases(rows, { me, gateCfg: cfg.gate });
+  const since = Date.now() - cfg.cases.periodDays * 86400000;
+  const { rows, systems, history } = await loadCaseRows(db,
+    { since, me, cfg: cfg.cases, sendersCfg: cfg.senders });
+  const built = buildCases(rows,
+    { me, gateCfg: cfg.gate, cfg: cfg.cases, sendersCfg: cfg.senders, systems, since });
   const auto = await collect({
     db, cfg, env: await environment(), gate, me, trueconfSession: session,
-    cases: casesSummary(built.cases, built.cross),
+    cases: casesSummary(built.cases, built.cross,
+      { systems: built.systems, history, periodDays: cfg.cases.periodDays }),
   });
   $("llmRequest").textContent = llmRequestText({
-    perDay: Math.round(rows.length / 30),
+    // Писем в день считаем по периоду, без поднятой истории.
+    perDay: Math.round((rows.length - history.added) / cfg.cases.periodDays),
     modelShare: gate.decidable ? gate.model / gate.decidable : null,
     check: await db.meta.get("report:model"),
   });

@@ -155,6 +155,94 @@
     <input type="number" id="massCcRecipients" min="2" max="1000">
   </label>
 
+  <h2>Дела</h2>
+  <p class="hint">
+    Во вкладке «Дела» показываются дела, в которых было движение за указанный
+    срок. Само дело собирается с первого письма: ранние письма той же
+    переписки поднимаются из ящика, чтобы была видна вся история.
+  </p>
+  <label>
+    <span>Показывать дела с движением за столько дней</span>
+    <input type="number" id="casesPeriodDays" min="1" max="3650">
+  </label>
+  <label>
+    <span>Непрочитанное не старше стольких дней делает дело новым</span>
+    <input type="number" id="casesNewDays" min="1" max="365">
+  </label>
+  <label>
+    <span>Сколько ранних писем поднимать ради истории дел</span>
+    <input type="number" id="casesHistoryLimit" min="0" max="200000">
+    <span class="hint">Предел на всю вкладку. Достигнут — дела, начавшиеся
+      раньше всех, покажутся с самого раннего поднятого письма, и отчёт о
+      проверке это отметит.</span>
+  </label>
+
+  <h2>Отправители</h2>
+  <p class="hint">
+    Во внутренней почте у писем систем нет заголовков рассылки, поэтому
+    отправитель узнаётся по тому, как он пишет: много писем, ни одного ответа
+    в переписке, вы ему не отвечали, темы повторяются с точностью до номера.
+    Письма таких отправителей становятся информированием без модели, а их
+    письма об одном объекте (номер инцидента, заявки) — одним делом.
+    Исключение — тема с признаком действия: такое письмо идёт в модель.
+  </p>
+  <label>
+    <span>Адреса информационных систем</span>
+    <input type="text" id="sendersSystemSenders" placeholder="noreply, servicedesk, @sd.corp.ru">
+    <span class="hint">Через запятую: адрес целиком, <code>@домен</code> или имя
+      до <code>@</code> — «noreply» узнаёт и noreply@, и noreply-jira@.</span>
+  </label>
+  <label>
+    <span>Узнавать отправителя по поведению начиная со стольких писем</span>
+    <input type="number" id="sendersMinLetters" min="0" max="1000">
+    <span class="hint">Ноль — не угадывать, только список адресов выше.</span>
+  </label>
+  <label>
+    <span>Доля писем с повторяющейся темой, %</span>
+    <input type="number" id="sendersTemplateSharePct" min="1" max="100">
+  </label>
+  <label>
+    <span>Столько получателей в среднем и больше — вещание</span>
+    <input type="number" id="sendersBroadcastRecipients" min="2" max="10000">
+    <span class="hint">Односторонний отправитель на широкий круг: объявления,
+      рассылки подразделений. Тоже информирование без модели.</span>
+  </label>
+  <label>
+    <span>Слова в теме, при которых письмо всё равно идёт в модель</span>
+    <input type="text" id="gateActionWords" placeholder="назначен, требуется, просроч">
+    <span class="hint">Через запятую. От вас могут ждать действия, и решать
+      это должна модель, а не отправитель: поручение от системы остаётся
+      поручением.</span>
+  </label>
+
+  <h2>Каталог организации</h2>
+  <p class="hint">
+    Должность и подразделение отправителя берутся из адресной книги
+    организации. Запросы идут по одному, с паузой и потолком на сеанс:
+    контроллеры домена перегружены, а уровень отправителя влияет только на
+    приоритет и срок поручения, но не на то, поручение это или нет.
+  </p>
+  <label>
+    <input type="checkbox" id="dirEnabled">
+    Спрашивать каталог
+  </label>
+  <label>
+    <input type="checkbox" id="dirIncludeRemote">
+    В том числе удалённые книги (GAL)
+  </label>
+  <label>
+    <span>Помнить найденное, дней</span>
+    <input type="number" id="dirCacheDays" min="1" max="3650">
+  </label>
+  <label>
+    <span>Пауза между запросами, мс</span>
+    <input type="number" id="dirPauseMs" min="0" max="60000">
+  </label>
+  <label>
+    <span>Не больше запросов за сеанс</span>
+    <input type="number" id="dirMaxPerSession" min="0" max="100000">
+  </label>
+
   <h2>Свои адреса</h2>
   <label>
     <span>Дополнительные адреса</span>
