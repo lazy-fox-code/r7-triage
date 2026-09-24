@@ -98,7 +98,13 @@ const day = (ms) => {
 const stamp = (ms) => (ms ? new Date(ms).toLocaleString("ru-RU",
   { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "");
 const clock = () => new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
-const STATE_COLOR = { new: "var(--st-new)", branch: "var(--st-stale)" };
+// Цвет состояния — один и тот же в списке, в карточке и на графе.
+const STATE_TOKEN = {
+  new: "new", work: "work", wait: "wait", over: "over",
+  done: "done", info: "info", old: "stale", branch: "stale",
+};
+const STATE_COLOR = (state) => `var(--st-${STATE_TOKEN[state] ?? "stale"})`;
+const STATE_BG = (state) => `var(--st-${STATE_TOKEN[state] ?? "stale"}-bg)`;
 
 // --- данные -------------------------------------------------------------------
 
@@ -156,6 +162,7 @@ function visibleCases() {
     // строкой. Поиск свёрнутость отменяет: искать нужно везде.
     if (owner && !q && !S.expandedSystems.has(owner)) return false;
     if (S.filter === "new" && c.state !== "new") return false;
+    if (S.filter === "wait" && c.state !== "wait") return false;
     if (S.filter === "big" && !bigCase(c)) return false;
     if (S.filter === "meet" && !c.counts.meet) return false;
     if (S.filter === "conf" && !c.counts.conf) return false;
@@ -213,11 +220,13 @@ function renderChips() {
   const counts = {
     all: own.length,
     new: own.filter((c) => c.state === "new").length,
+    wait: own.filter((c) => c.state === "wait").length,
     big: own.filter(bigCase).length,
     meet: own.filter((c) => c.counts.meet).length,
     conf: own.filter((c) => c.counts.conf).length,
   };
-  const names = { all: "Все", new: "Новое", big: "Крупные", meet: "Со встречами", conf: "С конференциями" };
+  const names = { all: "Все", new: "Новое", wait: "Жду ответа", big: "Крупные",
+    meet: "Со встречами", conf: "С конференциями" };
   const box = $("chips");
   box.textContent = "";
   for (const k of Object.keys(names)) {
@@ -238,8 +247,8 @@ function faces(c) {
 }
 
 function statePill(state) {
-  return h("span", { class: "state", style: `background: ${state === "new" ? "var(--st-new-bg)" : "var(--st-stale-bg)"};` },
-    h("span", { class: "glyph", style: `background: ${STATE_COLOR[state]};` }),
+  return h("span", { class: "state", style: `background: ${STATE_BG(state)};` },
+    h("span", { class: "glyph", style: `background: ${STATE_COLOR(state)};` }),
     STATE_NAMES[state] ?? "Ветка");
 }
 
@@ -296,10 +305,16 @@ function renderList(shown) {
       : "Дел пока нет: письма ещё разбираются. Вкладку можно закрыть — сбор продолжится." }));
     return;
   }
+  // Порядок групп — порядок внимания: новое, где ждут вас, что в работе,
+  // и только потом лента уведомлений и остывшее.
+  const ORDER = [
+    ["Новое", "new"], ["Жду ответа", "wait"], ["В работе", "work"],
+    ["Просрочено", "over"], ["Готово", "done"],
+    ["Переписка", "branch"], ["Информирование", "info"], ["Остыло", "old"],
+  ];
   const groups = S.filter === "big"
     ? [["Крупные дела", shown]]
-    : [["Новое", shown.filter((c) => c.state === "new")],
-      ["Ветки", shown.filter((c) => c.state !== "new")]];
+    : ORDER.map(([name, state]) => [name, shown.filter((c) => c.state === state)]);
   for (const [name, items] of groups) {
     if (!items.length) continue;
     box.append(h("div", { class: "grp" }, name, h("span", { class: "num", style: "color: var(--c-text-2);", text: num(items.length) })));

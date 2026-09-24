@@ -204,19 +204,29 @@ test("письма без Message-ID не дублируются при повт
   equal(await db.count("messages"), first, "повторный проход не должен добавить записей");
 });
 
-test("повторный проход по неизменному ящику ничего не переписывает", async () => {
+test("повторный проход пропускает папки, в которых ничего не изменилось", async () => {
   const tb = generate(new FakeThunderbird(), { messages: 300, seed: 3 });
   await scanner(tb).run("full");
   const before = await db.count("messages");
+  const queriesFirst = tb.queries;
 
   tb.restart();
-  const s = scanner(tb);
-  await s.run("full");
+  await scanner(tb).run("full");
 
   const state = await db.checkpoint.load("full");
   equal(await db.count("messages"), before, "число писем");
   equal(state.stats.stored, 0, "новых записей во втором проходе");
-  assert(state.stats.duplicates >= before, "повторы должны быть распознаны");
+  equal(state.stats.skippedFolders, state.folders.length, "все папки пропущены как неизменные");
+  equal(tb.queries, queriesFirst, "к неизменным папкам запросов нет");
+
+  // Пришло письмо — папка снова разбирается, остальные по-прежнему нет.
+  const inbox = tb.folders.find((f) => f.type === "inbox");
+  tb.addMessage(inbox, msg("свежее письмо", 0));
+  await scanner(tb).run("full");
+  const after = await db.checkpoint.load("full");
+  equal(after.stats.stored, 1, "новое письмо разобрано");
+  equal(after.stats.skippedFolders, state.folders.length - 1, "перебрана только изменившаяся папка");
+  equal(await db.count("messages"), before + 1, "писем стало на одно больше");
 });
 
 test("письмо ровно на границе окна не теряется", async () => {
@@ -904,6 +914,44 @@ test("отсев: обработка встреч по теме и письма,
   equal(fresh.outcome, "model", "письмо после вашего ответа решает модель");
 });
 
+test("дела: состояние видно по переписке — новое, жду ответа, в работе, остыло", async () => {
+  const me = new Set(["me@example.ru"]);
+  const now = Date.now();
+  const build = (rows) => buildCases(rows, { me, cfg: DEFAULTS.cases, now }).cases[0];
+
+  const fresh = build([letter("n1", { subject: "Смета на ремонт", read: false, ageH: 5 })]);
+  equal(fresh.state, "new", "непрочитанное входящее — новое");
+
+  const waiting = build([
+    letter("w1", { subject: "Договор на согласование", ageH: 30 }),
+    letter("w2", { subject: "RE: Договор на согласование", from: "me@example.ru", ageH: 10,
+      to: ["ivanov@example.ru"], threadId: "m:w1@example.ru",
+      thread: { root: "m:w1@example.ru", parent: "m:w1@example.ru", index: null } }),
+  ]);
+  equal(waiting.state, "wait", "последним писали вы — ждём ответа");
+
+  const working = build([
+    letter("k1", { subject: "Смета по объекту", ageH: 50 }),
+    letter("k2", { subject: "RE: Смета по объекту", from: "me@example.ru", ageH: 40,
+      to: ["ivanov@example.ru"], threadId: "m:k1@example.ru",
+      thread: { root: "m:k1@example.ru", parent: "m:k1@example.ru", index: null } }),
+    letter("k3", { subject: "RE: Смета по объекту", ageH: 20, threadId: "m:k1@example.ru",
+      thread: { root: "m:k1@example.ru", parent: "m:k2@example.ru", index: null } }),
+  ]);
+  equal(working.state, "work", "вы в переписке, последнее письмо прочитано — в работе");
+
+  const cold = build([letter("o1", { subject: "Прошлая переписка", ageH: 24 * 90 })]);
+  equal(cold.state, "old", "движения нет давно — дело остыло");
+
+  const notice = build([
+    letter("s1", { from: "noreply@sd.example.ru", fromName: "Service Desk",
+      subject: "Инцидент INC0012345 зарегистрирован", ageH: 40 }),
+    letter("s2", { from: "noreply@sd.example.ru", fromName: "Service Desk",
+      subject: "Инцидент INC0012345 решён", ageH: 20 }),
+  ]);
+  equal(notice.state, "info", "уведомления системы без вашего участия — информирование");
+});
+
 test("дела: приглашение, ответы участников и перенос — одна встреча", async () => {
   const me = new Set(["me@example.ru"]);
   const rows = [
@@ -1426,7 +1474,7 @@ test("дела: конференция связывает дела, но не с
   equal(cross[0].kind, "conf", "связь — через конференцию");
   assert(cross[0].why.includes("0005"), "в связи назван номер");
   const report = cases.find((c) => c.title === "Отчёт за квартал");
-  equal(report.state, "branch", "своё непрочитанное письмо — не новость");
+  equal(report.state, "wait", "своё непрочитанное письмо — не новость, но ответа ждём");
   equal(report.people.length, 0, "себя в участниках нет");
 });
 

@@ -70,6 +70,7 @@ export class Scanner {
   #state = null;
   #startedAt = 0;
   #progress = null;
+  #seen = {};
 
   /**
    * @param {object}   deps.browser  WebExtension API (внедряется ради тестов)
@@ -138,6 +139,7 @@ export class Scanner {
         done.add(f.key);
         state.doneFolders = [...done];
         state.current = null;
+        await this.#rememberFolder(scanId, f.key);
         await this.#save(state);
       }
 
@@ -155,6 +157,25 @@ export class Scanner {
 
   async #plan(scanId, bounds = {}) {
     const startedAt = Date.now();
+    const folders = await this.#listFolders();
+    // Папки, в которых с прошлого прохода ничего не изменилось, пропускаем.
+    // Ящик с онлайн-архивом и подключённым PST — это сотни папок, и каждый
+    // `messages.query` в 115 перебирает папку целиком: без этого свежий
+    // проход при каждом запуске клиента обходит весь архив заново и со
+    // стороны выглядит как бесконечный круг.
+    this.#seen = (await this.db.meta.get(`folders:${scanId}`)) ?? {};
+    const recheck = (this.cfg.folderRecheckDays ?? 30) * DAY;
+    const skipped = [];
+    for (const f of folders) {
+      const info = await this.#folderInfo(f.key);
+      f.total = info.total;
+      const prev = this.#seen[f.key];
+      const unchanged = prev && info.total != null
+        && prev.total === info.total && prev.unread === info.unread
+        && startedAt - (prev.at ?? 0) < recheck;
+      if (unchanged) skipped.push(f.key);
+    }
+
     const state = {
       v: CHECKPOINT_VERSION,
       scanId,
@@ -165,11 +186,16 @@ export class Scanner {
       // `since` — где остановиться; null означает «до самых старых».
       until: bounds.until ?? startedAt,
       since: bounds.since ?? null,
-      folders: await this.#listFolders(),
-      doneFolders: [],
+      folders,
+      // Пропущенные папки сразу считаются пройденными: пройти их заново
+      // нечего, а прогресс должен быть честным.
+      doneFolders: skipped,
       current: null,
       errors: [],
-      stats: { headers: 0, stored: 0, merged: 0, duplicates: 0, queries: 0, pages: 0 },
+      stats: {
+        headers: 0, stored: 0, merged: 0, duplicates: 0, queries: 0, pages: 0,
+        skippedFolders: skipped.length,
+      },
       done: false,
     };
     await this.#save(state);
@@ -284,12 +310,30 @@ export class Scanner {
   }
 
   async #folderTotal(folder) {
+    return (await this.#folderInfo(folderKey(folder))).total;
+  }
+
+  /**
+   * Сводка папки из `.msf`: сколько всего писем и сколько непрочитанных.
+   * Запроса к серверу не делает — это локальный индекс клиента.
+   */
+  async #folderInfo(key) {
     try {
-      const info = await this.browser.folders.getFolderInfo(folder);
-      return info?.totalMessageCount ?? null;
+      const info = await this.browser.folders.getFolderInfo(parseFolderKey(key));
+      return { total: info?.totalMessageCount ?? null, unread: info?.unreadMessageCount ?? null };
     } catch {
-      return null;   // только для отображения прогресса, на полноту не влияет
+      // Папка недоступна — считаем изменившейся: пропускать её нельзя.
+      return { total: null, unread: null };
     }
+  }
+
+  /** Запомнить сводку разобранной папки: по ней проход поймёт, что в ней
+   * ничего не изменилось, и не будет перебирать её заново. */
+  async #rememberFolder(scanId, key) {
+    const info = await this.#folderInfo(key);
+    if (info.total == null) return;
+    this.#seen[key] = { total: info.total, unread: info.unread, at: Date.now() };
+    await this.db.meta.set(`folders:${scanId}`, this.#seen);
   }
 
   // --- окно --------------------------------------------------------------

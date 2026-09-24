@@ -487,6 +487,18 @@ export function buildCases(rows, {
 
     const id = `c:${start.id}`;
     const isNew = unread > 0 && last.date >= now - newDays * DAY;
+    // Состояние дела из самой переписки, без модели. Поручений и сроков мы
+    // ещё не знаем, но кто написал последним и ответили ли вы — знаем
+    // точно, а это и есть ответ на вопрос «с этим делом что-то надо делать
+    // или нет». Модель добавит сверху «поручение» и «просрочено».
+    const lastMine = last.mine ?? me.has(last.fromId);
+    const myLetters = fromMe > 0;
+    const quiet = last.date < now - (cfg.staleDays ?? 30) * DAY;
+    const state = isNew ? "new"
+      : lastMine ? "wait"
+        : myLetters ? "work"
+          : quiet ? "old"
+            : "branch";
     const meetingList = [...meetings.values()].sort((a, b) => (a.start ?? 0) - (b.start ?? 0));
     // Дело начинается с первого письма или события — смотря что раньше.
     const firstAt = Math.min(start.date, ...meetingList.map((m) => m.start).filter((ms) => ms > 0));
@@ -499,7 +511,7 @@ export function buildCases(rows, {
       firstAt,
       lastAt: last.date,
       startedBefore: since != null && firstAt < since,
-      state: isNew ? "new" : "branch",
+      state,
       unread,
       fromMe,
       early,
@@ -539,6 +551,9 @@ export function buildCases(rows, {
     // закрывает собой переписку.
     const writers = [...new Set(letters.filter((l) => !l.mine).map((l) => l.fromId))];
     c.systemOwner = writers.length > 0 && writers.every((w) => sys.has(w)) ? writers[0] : null;
+    // Уведомления системы — информирование, пока вы в них не вступили:
+    // ответили — значит, это уже работа, а не лента.
+    if (c.systemOwner && !myLetters && c.state !== "new") c.state = "info";
     // Вес дела: по нему в списке поднимаются проекты и внедрения, а не
     // однописьменные уведомления. Письма, участники, вложения и срок жизни.
     c.weight = Math.round(

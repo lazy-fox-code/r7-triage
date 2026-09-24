@@ -118,6 +118,9 @@ function scanSummary(checkpoints) {
     merged: c.stats?.merged ?? 0,
     queries: c.stats?.queries ?? 0,
     errors: c.errors?.length ?? 0,
+    // Папки, в которых с прошлого раза ничего не изменилось, проход не
+    // перебирает: на ящике с архивом и PST это сотни лишних запросов.
+    skippedFolders: c.stats?.skippedFolders ?? 0,
     // Длительность честна только для прохода без обрывов: после обрыва это
     // время от старта до конца вместе с паузой.
     durationMs: c.finishedAt && c.startedAt ? c.finishedAt - c.startedAt : null,
@@ -294,9 +297,10 @@ function headline(id, a) {
 function stageDetails(id, a) {
   switch (id) {
     case "T1":
-      return table(["Проход", "Завершён", "Папки", "Записано", "Копий", "Запросов", "Ошибок", "Длительность"],
-        a.T1.passes.map((p) => [p.pass, yes(p.done), p.folders, num(p.stored), num(p.merged),
-          num(p.queries), num(p.errors), duration(p.durationMs) + (p.interrupted ? " (с обрывом)" : "")]));
+      return table(["Проход", "Завершён", "Папки", "Пропущено", "Записано", "Копий", "Запросов", "Ошибок", "Длительность"],
+        a.T1.passes.map((p) => [p.pass, yes(p.done), p.folders, num(p.skippedFolders),
+          num(p.stored), num(p.merged), num(p.queries), num(p.errors),
+          duration(p.durationMs) + (p.interrupted ? " (с обрывом)" : "")]));
     case "T2": {
       const s = a.T2.stats ?? {};
       const f = a.T2.formats;

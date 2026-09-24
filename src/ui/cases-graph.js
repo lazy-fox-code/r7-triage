@@ -60,6 +60,18 @@ export function initials(name, email) {
 }
 
 const artifacts = (c) => c.counts.mail + c.counts.meet + c.counts.conf + c.counts.task + (c.counts.files ? 1 : 0);
+
+// Насколько дело просит внимания. Порядок важнее точного числа: он решает,
+// что окажется в центре кадра, а что по краю.
+const ATTENTION = { new: 1000, over: 900, wait: 700, work: 500, done: 200, branch: 300, info: 60, old: 20 };
+const DAY_MS = 86400000;
+function attention(c) {
+  const days = Math.max(0, (Date.now() - c.lastAt) / DAY_MS);
+  return (ATTENTION[c.state] ?? 100)
+    + Math.min(120, (c.weight ?? 0) * 1.5)
+    + Math.max(0, 60 - days * 2)
+    + (c.systemOwner ? -300 : 0);
+}
 const dealR = (c) => Math.max(8, Math.min(24, 6.5 + 3.2 * Math.sqrt(artifacts(c))));
 
 /** Элементы дела для раскрытия на графе. */
@@ -168,10 +180,11 @@ export class CaseGraph {
     const { cases, cross, selected, allPeople, expanded } = this.data;
     const focus = selected ? this.byId.get(selected) : null;
 
-    // Раскладка обзора: не кольцо, а заполнение кадра по спирали от центра,
-    // и самые свежие дела — в середине. Так видно то, что происходит сейчас,
-    // а не то, что первым попало в список.
-    const order = [...cases].sort((a, b) => b.lastAt - a.lastAt).map((c) => c.id);
+    // Раскладка обзора: заполнение кадра по спирали от центра. В середине —
+    // то, что требует внимания: новое, где ждут вашего ответа, крупные дела.
+    // Уведомления систем и остывшее уходят на периферию: они фон, а не
+    // работа.
+    const order = [...cases].sort((a, b) => attention(b) - attention(a)).map((c) => c.id);
     const seat = new Map(order.map((id, i) => [id, i]));
     const aspect = this.canvas
       ? Math.max(0.6, Math.min(2.2, (this.canvas.clientWidth || 1200) / (this.canvas.clientHeight || 700)))
@@ -230,7 +243,10 @@ export class CaseGraph {
         const shown = sys.collapsed ? [] : ids;
         if (!sys.collapsed && ids.length < 2) continue;
         const count = sys.cases.length;
-        const p = prev[sys.id] || { x: (Math.random() - 0.5) * 420, y: (Math.random() - 0.5) * 420 };
+        // Система — фон: её место по краю кадра, а не в середине.
+        const ring = 118 * Math.sqrt(cases.length + 4);
+        const ang = (nodes.length * 2.4) % (Math.PI * 2);
+        const p = prev[sys.id] || { x: Math.cos(ang) * ring * 1.15, y: Math.sin(ang) * ring };
         nodes.push({ id: sys.id, t: "system", role: "system", g: "system",
           r: sys.collapsed ? 15 : 13, x: p.x, y: p.y,
           label: sys.name, email: sys.email, count: sys.collapsed ? count : 0,
