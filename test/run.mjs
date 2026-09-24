@@ -51,6 +51,7 @@ const tc = await import(`${SRC}trueconf-api.js`);
 const { Semaphore } = await import(`${SRC}llm.js`);
 const { checkModel, SAMPLES } = await import(`${SRC}model-check.js`);
 const { checkDirectory } = await import(`${SRC}directory-check.js`);
+const { Tagger, TAGS, awaitingKeys } = await import(`${SRC}tagger.js`);
 const { DirectoryLookup, levelOf } = await import(`${SRC}directory.js`);
 const report = await import(`${SRC}check-report.js`);
 const { buildCases, diffCases, displaySubject, loadCaseRows, objectId, subjectTemplate } = await import(`${SRC}cases.js`);
@@ -914,6 +915,47 @@ test("отсев: обработка встреч по теме и письма,
   equal(fresh.outcome, "model", "письмо после вашего ответа решает модель");
 });
 
+test("метки: вердикт виден в клиенте, чужие метки целы, снятие обратимо", async () => {
+  await fresh();
+  const tb = new FakeThunderbird();
+  tb.addAccount("account1", "Ящик", ["me@example.ru"]);
+  const inbox = tb.addFolder("account1", "/INBOX", { name: "Входящие", type: "inbox" });
+  // Ответ на приглашение — шум, копия среди многих — информирование,
+  // обычное письмо лично мне — решает модель, метки не получает.
+  tb.addMessage(inbox, { ...msg("Принято: Планёрка", 3), author: "petrov@example.ru" });
+  tb.addMessage(inbox, { ...msg("Протокол совещания", 2), author: "petrov@example.ru",
+    recipients: ["boss@example.ru"], ccList: ["me@example.ru"], tags: ["важное"] });
+  tb.addMessage(inbox, { ...msg("Смета на ремонт", 1), author: "petrov@example.ru" });
+
+  await scanner(tb).run("full");
+  await enricher(tb).run();
+
+  const me = new Set(["me@example.ru"]);
+  const tagger = new Tagger({ browser: tb.api, db, cfg: DEFAULTS.tags });
+  await tagger.run({ me, gateCfg: DEFAULTS.gate });
+
+  const tagsOf = (subject) => inbox.messages.find((m) => m.subject === subject).tags ?? [];
+  assert(tagsOf("Принято: Планёрка").includes(TAGS.noise.key), "ответ на приглашение помечен шумом");
+  assert(tagsOf("Протокол совещания").includes(TAGS.info.key), "копия помечена информированием");
+  assert(tagsOf("Протокол совещания").includes("важное"), "чужая метка не тронута");
+  equal(tagsOf("Смета на ремонт").length, 0, "письму для модели метку не ставим");
+  assert(tb.tagDefs.some((t) => t.key === TAGS.info.key), "метки заведены в клиенте");
+
+  // Повторный проход ничего не переписывает: метки уже стоят.
+  const writes = tb.tagWrites;
+  await new Tagger({ browser: tb.api, db, cfg: DEFAULTS.tags }).run({ me, gateCfg: DEFAULTS.gate });
+  equal(tb.tagWrites, writes, "повторный проход не трогает уже помеченные письма");
+
+  // Снятие убирает только наши метки.
+  await new Tagger({ browser: tb.api, db, cfg: DEFAULTS.tags }).run({ me, gateCfg: DEFAULTS.gate, clear: true });
+  equal(tagsOf("Принято: Планёрка").length, 0, "метка расширения снята");
+  assert(tagsOf("Протокол совещания").includes("важное"), "чужая метка пережила снятие");
+  assert(!tagsOf("Протокол совещания").includes(TAGS.info.key), "наша метка снята");
+
+  equal(awaitingKeys([{ state: "wait", letters: [{ id: "a" }, { id: "b" }] },
+    { state: "new", letters: [{ id: "c" }] }]).size, 1, "ждут ответа — последнее письмо дела");
+});
+
 test("архив: кандидаты по тишине, исключения и обратимость переноса", async () => {
   const me = new Set(["me@example.ru"]);
   const now = Date.now();
@@ -924,7 +966,8 @@ test("архив: кандидаты по тишине, исключения и 
 
   const quiet = build([letter("q1", { subject: "Прошлая закупка", ageH: 24 * 60 })]);
   assert(quiet.archive.candidate, "нет писем два месяца — кандидат в архив");
-  equal(quiet.archive.quietDays, 60, "сколько дней тишины");
+  // Считаем в сутках, поэтому на границе допускаем день туда-сюда.
+  assert(quiet.archive.quietDays >= 59 && quiet.archive.quietDays <= 60, "сколько дней тишины");
 
   const recent = build([letter("r1", { subject: "Свежая закупка", ageH: 24 * 10 })]);
   assert(!recent.archive.candidate, "дело с письмами за последний месяц не трогаем");

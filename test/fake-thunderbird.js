@@ -41,6 +41,8 @@ export class FakeThunderbird {
     this.onFull = null;         // хук: обрыв посреди обогащения
     this.failFull = null;       // (m) => true — сервер не отдаёт письмо
     this.moves = 0;             // сколько писем перенесено между папками
+    this.tagDefs = [];          // заведённые метки
+    this.tagWrites = 0;         // сколько раз метки письма переписывались
   }
 
   addAccount(id, name = id, identities = []) {
@@ -243,6 +245,23 @@ export class FakeThunderbird {
           tb.fullLog.push(m.date);
           tb.onFull?.(tb, m);
           return JSON.parse(JSON.stringify(tb.#full(m)));
+        },
+        async get(id) {
+          const m = tb.#byNumber(id);
+          if (!m || m.removed) throw new Error(`Message not found: ${id}`);
+          const f = tb.folders.find((x) => x.messages.includes(m)) ?? {};
+          return tb.#header(m, f);
+        },
+        async update(id, { tags }) {
+          const m = tb.#byNumber(id);
+          if (!m || m.removed) throw new Error(`Message not found: ${id}`);
+          if (tags) { m.tags = [...tags]; tb.tagWrites++; }
+        },
+        async listTags() {
+          return [...tb.tagDefs];
+        },
+        async createTag(key, tag, color) {
+          tb.tagDefs.push({ key, tag, color });
         },
         /** Перенос писем в другую папку, как messages.move в 115. */
         async move(ids, destination) {

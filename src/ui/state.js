@@ -115,6 +115,20 @@ function renderGate(r) {
     без своих и недочитанных.</p>`;
 }
 
+for (const [id, cmd, note] of [["tagsRun", "tags.run", "Расставляю метки…"],
+  ["tagsClear", "tags.clear", "Снимаю метки…"], ["tagsStop", "tags.stop", "Останавливаю…"]]) {
+  document.getElementById(id).addEventListener("click", async () => {
+    $("tagsOut").textContent = note;
+    try {
+      await browser.runtime.sendMessage({ cmd });
+    } catch (e) {
+      $("tagsOut").textContent = String(e?.message ?? e);
+      return;
+    }
+    renderTags(await db.meta.get("tagger"));
+  });
+}
+
 // Кнопка «это мой адрес» рядом с частым адресатом: дописывает его в свои
 // адреса. После этого замер отсева стоит посчитать заново.
 document.addEventListener("click", async (e) => {
@@ -129,6 +143,7 @@ document.addEventListener("click", async (e) => {
       const res = await browser.runtime.sendMessage({ cmd: "archive.undo", at: Number(undo) });
       e.target.textContent = `возвращено писем: ${res?.moved ?? 0}`;
       renderArchive(await db.meta.get("archive:receipts"));
+  renderTags(await db.meta.get("tagger"));
     } catch (err) {
       e.target.textContent = `не вышло: ${String(err?.message ?? err)}`;
     }
@@ -154,6 +169,17 @@ function renderArchive(receipts) {
     ${esc(when(r.at))} — ${num(r.letters?.length ?? 0)} писем в папку
     ${esc(r.target?.path ?? "—")}${r.missing ? `, не найдено ${num(r.missing)}` : ""}.
     <button data-undo="${r.at}">вернуть на место</button></p>`).join("");
+}
+
+/** Состояние прохода меток. */
+function renderTags(st) {
+  const box = $("tagsOut");
+  if (!st) { box.textContent = "Метки не расставлялись."; return; }
+  const what = st.clear ? "снято меток" : "помечено писем";
+  const n = st.clear ? st.cleared : st.tagged;
+  box.innerHTML = `${what}: <b>${num(n)}</b>, просмотрено ${num(st.seen)},
+    папок пройдено ${num(st.doneFolders?.length ?? 0)}
+    ${st.done ? `— закончено ${esc(when(st.finishedAt))}` : "— не закончено"}`;
 }
 
 async function refresh() {

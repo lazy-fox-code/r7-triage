@@ -28,6 +28,8 @@ import { myAddresses } from "./me.js";
 import { gateReport } from "./report.js";
 import { buildCases, loadCaseRows } from "./cases.js";
 import { findHeader } from "./locate.js";
+import { Tagger, awaitingKeys, TAGS } from "./tagger.js";
+import { profileSenders } from "./senders.js";
 import { folderKey, parseFolderKey } from "./keys.js";
 import * as settings from "./settings.js";
 import * as trial from "./trial.js";
@@ -367,6 +369,46 @@ async function openLetter(id) {
   return { ok: true };
 }
 
+// --- метки на письмах ----------------------------------------------------------
+//
+// Вердикт, видный в самом клиенте: «Информирование», «Шум», «Жду ответа».
+// Проход идёт по папкам и переживает закрытие клиента; «снять все метки»
+// убирает только ключи r7t-*, чужие метки не трогает.
+
+let tagger = null;
+
+async function runTagger({ clear = false } = {}) {
+  if (tagger?.status().running) return tagger.status();
+  const cfg = await settings.load();
+  const me = await myAddresses(browser, cfg.me.aliases);
+  const sendersCfg = settings.sendersCfg(cfg);
+  const profiled = clear ? null : await profileSenders({ db, me, cfg: sendersCfg });
+
+  let awaiting = new Set();
+  if (!clear && cfg.tags.awaiting) {
+    const since = Date.now() - cfg.cases.periodDays * DAY;
+    const { rows, systems, merges } = await loadCaseRows(db, { since, me, cfg: cfg.cases, sendersCfg });
+    const { cases } = buildCases(rows, {
+      me, gateCfg: cfg.gate, cfg: cfg.cases, sendersCfg, systems, merges, since,
+    });
+    awaiting = awaitingKeys(cases);
+  }
+
+  tagger = new Tagger({
+    browser, db, cfg: cfg.tags,
+    onProgress: (st) => broadcast({ running: true, pass: "tags", tagged: st.tagged, seen: st.seen }),
+  });
+  return tagger.run({
+    me,
+    gateCfg: cfg.gate,
+    index: profiled
+      ? { senders: profiled.profiles, threads: profiled.threads, teamThreads: profiled.teamThreads }
+      : null,
+    awaiting,
+    clear,
+  });
+}
+
 // --- перенос в архив -----------------------------------------------------------
 //
 // Автоматики здесь нет: правило собирает кандидатов, человек смотрит список и
@@ -398,7 +440,16 @@ async function archiveLetters(keys) {
   }
 
   for (const ids of byFolder.values()) {
-    if (ids.length) await browser.messages.move(ids, target);
+    if (!ids.length) continue;
+    // Метка ставится до переноса: после него номера писем меняются.
+    try {
+      for (const id of ids) {
+        const hdr = await browser.messages.get(id);
+        const tags = [...new Set([...(hdr?.tags ?? []), TAGS.archived.key])];
+        await browser.messages.update(id, { tags });
+      }
+    } catch { /* метки не критичны для переноса */ }
+    await browser.messages.move(ids, target);
   }
 
   const receipt = {
@@ -468,6 +519,10 @@ browser.runtime.onMessage.addListener((msg) => {
     case "gate.report": return runGateReport();
     case "cases.refresh": refreshNow(); return status();
     case "cases.badge":  return updateBadge();
+    case "tags.run":    return runTagger({ clear: false });
+    case "tags.clear":  return runTagger({ clear: true });
+    case "tags.stop":   tagger?.stop(); return tagger?.status() ?? { running: false };
+    case "tags.status": return db.meta.get("tagger");
     case "cases.archive": return archiveLetters(msg.keys);
     case "archive.undo":  return undoArchive(msg.at);
     case "archive.receipts": return db.meta.get("archive:receipts");
