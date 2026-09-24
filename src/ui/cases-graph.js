@@ -36,7 +36,7 @@ const GLYPH = {
 
 const TOKENS = ["--st-new", "--st-work", "--st-wait", "--st-over", "--st-done", "--st-info", "--st-stale",
   "--g-bg", "--g-link", "--g-link-person", "--g-label", "--g-label-2",
-  "--g-node-stroke", "--c-accent", "--c-text-2", "--c-surface", "--c-border-strong"];
+  "--g-node-stroke", "--g-dim", "--c-accent", "--c-text-2", "--c-surface", "--c-border-strong"];
 
 const KIND_NAME = { deal: "Дело", branch: "Переписка", child: "Элемент", meet: "Встреча", task: "Задача",
   conf: "Конференция TrueConf", chat: "Беседа TrueConf", files: "Вложения", person: "Контакт",
@@ -72,6 +72,15 @@ function attention(c) {
     + Math.max(0, 60 - days * 2)
     + (c.systemOwner ? -300 : 0);
 }
+// Постоянный угол по строке: узел без прежней позиции встаёт на одно и то же
+// место при каждом перестроении, а не куда выпадет случайное число.
+function hashAngle(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return ((h >>> 0) / 4294967296) * Math.PI * 2;
+}
+const centroid = (ns) => ({ x: ns.reduce((s, n) => s + n.x, 0) / ns.length, y: ns.reduce((s, n) => s + n.y, 0) / ns.length });
+
 const dealR = (c) => Math.max(8, Math.min(24, 6.5 + 3.2 * Math.sqrt(artifacts(c))));
 
 /** Элементы дела для раскрытия на графе. */
@@ -135,7 +144,14 @@ export class CaseGraph {
     this.paths = {};
     this.tokens = {};
     this.hoverId = null;
+    this.hoverSet = null;
+    this.hoverAt = 0;
     this.dropId = null;
+    // Холст перерисовывается, только когда что-то изменилось или идёт
+    // анимация: в покое граф не тратит процессор.
+    this.dirty = true;
+    this.animUntil = 0;
+    this.textCache = new Map();
     this.alpha = 1;
     this.userMoved = false;
     this.data = { cases: [], cross: [], systems: [], selected: null, scope: "all", allPeople: false, expanded: new Set() };
@@ -150,9 +166,13 @@ export class CaseGraph {
 
   destroy() { cancelAnimationFrame(this.raf); }
 
+  invalidate() { this.dirty = true; }
+  animate(ms) { this.animUntil = Math.max(this.animUntil, performance.now() + ms); }
+
   readTokens() {
     const cs = getComputedStyle(document.documentElement);
     for (const k of TOKENS) this.tokens[k] = cs.getPropertyValue(k).trim();
+    this.invalidate();
   }
   col(s) { return this.tokens[STATES[s]?.c ?? "--c-text-2"] || "#888"; }
   reduced() { return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches; }
@@ -166,7 +186,25 @@ export class CaseGraph {
 
   pulse(caseId) {
     const n = this.index[caseId];
-    if (n) n.pulse = performance.now();
+    if (n) { n.pulse = performance.now(); this.animate(650); }
+  }
+
+  /** Наведённый узел и его соседи: остальное приглушается. */
+  setHover(id) {
+    if (id === this.hoverId) return;
+    if (id && !this.hoverId) { this.hoverAt = performance.now(); this.animate(160); }
+    this.hoverId = id;
+    this.hoverSet = id ? this.neighbours(id) : null;
+    this.invalidate();
+  }
+
+  neighbours(id) {
+    const s = new Set([id]);
+    for (const l of this.links) {
+      if (l.a === id) s.add(l.b);
+      else if (l.b === id) s.add(l.a);
+    }
+    return s;
   }
 
   // --- модель графа ---------------------------------------------------------
@@ -227,6 +265,7 @@ export class CaseGraph {
       });
     }
 
+    const dealAt = new Map(nodes.map((n) => [n.id, n]));
     const vis = new Set(cases.map((c) => c.id));
     for (const l of cross) {
       if (vis.has(l.a) && vis.has(l.b)) links.push({ a: l.a, b: l.b, kind: l.kind, why: l.why });
@@ -243,10 +282,19 @@ export class CaseGraph {
         const shown = sys.collapsed ? [] : ids;
         if (!sys.collapsed && ids.length < 2) continue;
         const count = sys.cases.length;
-        // Система — фон: её место по краю кадра, а не в середине.
-        const ring = 118 * Math.sqrt(cases.length + 4);
-        const ang = (nodes.length * 2.4) % (Math.PI * 2);
-        const p = prev[sys.id] || { x: Math.cos(ang) * ring * 1.15, y: Math.sin(ang) * ring };
+        // Система — фон: её место по краю кадра, а не в середине, — со
+        // стороны её дел, чтобы связи к ним были короткими.
+        let p = prev[sys.id];
+        if (!p) {
+          const ring = 118 * Math.sqrt(cases.length + 4) * 1.15;
+          let ang = hashAngle(sys.id);
+          const at = ids.map((id) => dealAt.get(id)).filter(Boolean);
+          if (at.length) {
+            const m = centroid(at);
+            if (Math.hypot(m.x / aspect, m.y) > 40) ang = Math.atan2(m.y, m.x / aspect);
+          }
+          p = { x: Math.cos(ang) * ring * aspect, y: Math.sin(ang) * ring };
+        }
         nodes.push({ id: sys.id, t: "system", role: "system", g: "system",
           r: sys.collapsed ? 15 : 13, x: p.x, y: p.y,
           label: sys.name, email: sys.email, count: sys.collapsed ? count : 0,
@@ -268,7 +316,13 @@ export class CaseGraph {
       for (const { p, cases: ids } of seen.values()) {
         if (ids.length < 2) continue;
         const pid = `p:${p.email}`;
-        const pp = prev[pid] || { x: (Math.random() - 0.5) * 420, y: (Math.random() - 0.5) * 420 };
+        // Контакт встаёт между своими делами, со сдвигом по своему адресу.
+        let pp = prev[pid];
+        if (!pp) {
+          const m = centroid(ids.map((id) => dealAt.get(id)));
+          const a = hashAngle(pid);
+          pp = { x: m.x + Math.cos(a) * 26, y: m.y + Math.sin(a) * 26 };
+        }
         nodes.push({ id: pid, t: "person", role: "person", g: "person", r: 10, x: pp.x, y: pp.y,
           label: p.name || p.email, why: `пишет в ${ids.length} ${plural(ids.length, ["деле", "делах", "делах"])}`,
           ini: initials(p.name, p.email), born: prev[pid] ? (prev[pid].born || 0) : bornNow });
@@ -281,6 +335,10 @@ export class CaseGraph {
     this.index = {};
     for (const n of nodes) this.index[n.id] = n;
     this.focusId = focus ? focus.id : null;
+    if (this.hoverId && !this.index[this.hoverId]) { this.hoverId = null; this.hoverSet = null; }
+    else if (this.hoverId) this.hoverSet = this.neighbours(this.hoverId);
+    if (bornNow) this.animate(300);
+    this.invalidate();
     if (focus) { this.alpha = 0; this.layoutFocus(); }
     else {
       this.alpha = initial ? 1 : Math.max(this.alpha, 0.6);
@@ -307,11 +365,16 @@ export class CaseGraph {
     });
 
     let outer = Rring;
-    for (const e of els) {
-      const kids = this.nodes.filter((k) => k.host === e.id);
+    const kidsOf = els.map((e) => this.nodes.filter((k) => k.host === e.id));
+    // Соседний раскрытый элемент делит промежуток пополам — веера не
+    // налезают друг на друга; нераскрытый сосед отдаёт почти весь.
+    const side = (j) => (n > 1 && kidsOf[(j + n) % n].length ? 0.45 : 0.9) * stepA;
+    for (const [i, e] of els.entries()) {
+      const kids = kidsOf[i];
       if (!kids.length) continue;
-      const R2 = Rring + 74;
-      const spread = Math.min(1.5, kids.length * 0.2);
+      const spread = Math.min(1.5, kids.length * 0.2, 2 * Math.min(side(i - 1), side(i + 1)));
+      // Узкий веер уходит дальше от центра, чтобы фишки не слипались.
+      const R2 = Math.max(Rring + 74, kids.length > 1 ? (kids.length - 1) * 30 / spread : 0);
       kids.forEach((k, j) => {
         const a = e.ang - spread / 2 + (kids.length > 1 ? j * (spread / (kids.length - 1)) : 0);
         k.x = Math.cos(a) * R2; k.y = Math.sin(a) * R2;
@@ -329,12 +392,21 @@ export class CaseGraph {
       if (l.a === this.focusId) linked[l.b] = true;
       if (l.b === this.focusId) linked[l.a] = true;
     }
-    const far = this.nodes.filter((x) => x.role === "far");
-    far.sort((a, b) => (linked[b.id] ? 1 : 0) - (linked[a.id] ? 1 : 0));
     const rx = (W / 2) / k * 0.9;
     const ry = (H / 2) / k * 0.9;
-    far.forEach((f, i) => {
-      const a = -Math.PI / 2 + (i + 0.5) * (Math.PI * 2 / Math.max(1, far.length));
+    // Прочие дела встают по краю в том же порядке по кругу, в каком стояли:
+    // связи от центра не перекрещиваются, а при смене дела края почти не
+    // двигаются. Поворот всего круга подобран под прежние углы.
+    const far = this.nodes.filter((x) => x.role === "far")
+      .map((f) => ({ f, a0: Math.atan2(f.y / ry, f.x / rx) }))
+      .sort((p, q) => p.a0 - q.a0);
+    const fstep = Math.PI * 2 / Math.max(1, far.length);
+    let sx = 0;
+    let sy = 0;
+    far.forEach(({ a0 }, i) => { sx += Math.cos(a0 - i * fstep); sy += Math.sin(a0 - i * fstep); });
+    const base = far.length ? Math.atan2(sy, sx) : 0;
+    far.forEach(({ f }, i) => {
+      const a = base + i * fstep;
       f.x = Math.cos(a) * rx; f.y = Math.sin(a) * ry;
       f.linked = Boolean(linked[f.id]);
       f.rSmall = f.r * (f.linked ? 0.72 : 0.5);
@@ -348,6 +420,7 @@ export class CaseGraph {
       this.cam = { t0: performance.now(), dur: 420, fx: this.view.x, fy: this.view.y, fk: this.view.k, x, y, k };
     }
     this.userMoved = false;
+    this.invalidate();
     this.hooks.onZoom?.(k);
   }
 
@@ -404,7 +477,11 @@ export class CaseGraph {
     if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) {
       c.width = Math.round(w * dpr); c.height = Math.round(h * dpr);
       if (this.focusId) this.layoutFocus(); else if (!this.userMoved) this.fit();
+      this.invalidate();
     }
+    const physics = !this.focusId && this.alpha > 0.004;
+    if (!this.dirty && !this.cam && !physics && performance.now() >= this.animUntil) return;
+    this.dirty = false;
     if (this.cam) {
       const t = (performance.now() - this.cam.t0) / this.cam.dur;
       if (t >= 1) { this.view.x = this.cam.x; this.view.y = this.cam.y; this.view.k = this.cam.k; this.cam = null; }
@@ -414,7 +491,12 @@ export class CaseGraph {
         this.view.x = C.fx + (C.x - C.fx) * e; this.view.y = C.fy + (C.y - C.fy) * e; this.view.k = C.fk + (C.k - C.fk) * e;
       }
     }
-    if (!this.focusId && this.alpha > 0.004) { this.step(this.alpha); this.alpha *= 0.965; }
+    if (physics) {
+      this.step(this.alpha); this.alpha *= 0.965;
+      // Раскладка успокоилась — кадр подгоняется под то, где узлы оказались,
+      // если вид не двигали руками.
+      if (this.alpha <= 0.004 && !this.userMoved) this.fit();
+    }
     this.draw(w, h, dpr);
   }
 
@@ -431,28 +513,47 @@ export class CaseGraph {
     ctx.clearRect(0, 0, w, h);
     ctx.save(); ctx.translate(v.x, v.y); ctx.scale(v.k, v.k);
 
-    const vis = (n) => {
+    const base = (n) => {
       if (!this.focusId) return n.t === "deal" ? (STATES[n.state]?.act ?? 0.8) : 0.8;
       if (n.role === "far") return onlySel ? 0 : (n.linked ? 0.85 : 0.3);
       return 1;
     };
+    // Наведённый узел и его соседи — в полную силу, остальное приглушено.
+    const hs = this.hoverSet;
+    const hl = red ? 1 : Math.min(1, (now - this.hoverAt) / 140);
+    const dim = hs ? 1 - (1 - (parseFloat(T["--g-dim"]) || 0.15)) * hl : 1;
+    const vis = (n) => (hs && !hs.has(n.id) && n.id !== this.dropId ? base(n) * dim : base(n));
 
     for (const l of this.links) {
       const a = this.index[l.a];
       const b = this.index[l.b];
       if (!a || !b) continue;
-      const al = Math.min(vis(a), vis(b));
+      const on = hs && (l.a === this.hoverId || l.b === this.hoverId);
+      const al = Math.min(base(a), base(b)) * (hs && !on ? dim : 1);
       if (al <= 0.01) continue;
-      ctx.globalAlpha = al * (l.kind === "elem" || l.kind === "thread" ? 0.6 : 0.85);
+      const own = l.kind === "elem" || l.kind === "thread";
+      ctx.globalAlpha = on ? 1 : al * (own ? 0.6 : 0.85);
       ctx.beginPath();
       ctx.setLineDash(l.kind === "meet" ? [6, 4] : l.kind === "conf" ? [0.1, 4.5]
         : l.kind === "chat" ? [7, 3, 1.5, 3] : l.kind === "system" ? [3, 3] : []);
       ctx.lineCap = l.kind === "conf" ? "round" : "butt";
-      ctx.lineWidth = l.kind === "person" ? 0.6 : l.kind === "system" ? 0.8 : l.kind === "elem" ? 1.2 : l.kind === "thread" ? 1 : 1.7;
-      ctx.strokeStyle = (l.kind === "elem" || l.kind === "thread") ? this.col(a.state || "branch")
+      ctx.lineWidth = (l.kind === "person" ? 0.6 : l.kind === "system" ? 0.8 : l.kind === "elem" ? 1.2 : l.kind === "thread" ? 1 : 1.7)
+        + (on ? 0.8 : 0);
+      ctx.strokeStyle = own ? this.col(a.state || "branch")
         : (l.kind === "person" || l.kind === "system") ? T["--g-link-person"] : T["--g-link"];
-      const grow = (l.born && !red) ? Math.min(1, (now - l.born) / 200) : 1;
-      ctx.moveTo(a.x, a.y); ctx.lineTo(a.x + (b.x - a.x) * grow, a.y + (b.y - a.y) * grow);
+      ctx.moveTo(a.x, a.y);
+      if (own || l.kind === "person" || l.kind === "system") {
+        const grow = (l.born && !red) ? Math.min(1, (now - l.born) / 200) : 1;
+        ctx.lineTo(a.x + (b.x - a.x) * grow, a.y + (b.y - a.y) * grow);
+      } else {
+        // Связи между делами слегка изогнуты: параллельные не сливаются и
+        // реже идут сквозь чужие узлы. Изгиб пары всегда в одну сторону;
+        // у длинных хорд он ограничен, чтобы они не выгибались через кадр.
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const s = (l.a < l.b ? 1 : -1) * Math.min(0.15, 40 / (Math.hypot(dx, dy) || 1));
+        ctx.quadraticCurveTo((a.x + b.x) / 2 - dy * s, (a.y + b.y) / 2 + dx * s, b.x, b.y);
+      }
       ctx.stroke();
     }
     ctx.setLineDash([]); ctx.globalAlpha = 1;
@@ -475,41 +576,117 @@ export class CaseGraph {
       }
     }
 
-    ctx.textAlign = "center"; ctx.textBaseline = "top";
+    this.drawLabels(ctx, vis);
+    ctx.restore(); ctx.globalAlpha = 1;
+  }
+
+  /** Насколько подпись узла важна; null — узел не подписывается. */
+  labelPriority(n) {
+    const near = this.hoverSet?.has(n.id) ? 1e7 : 0;
+    if (n.role === "center") return 1e9;
+    if (n.id === this.hoverId) return 1e8;
+    if (n.t === "deal") {
+      // В фокусе дальние несвязанные дела не подписаны: они фон.
+      if (n.role === "far" && !n.linked && !near) return null;
+      return near + (n.linked ? 1e5 : 0) + 2000 + attention(n.deal);
+    }
+    if (n.role === "el") return near + 1e6;
+    if (n.role === "child") return near + 5e5;
+    if (n.role === "system") return near + 1000 + Math.min(n.count, 500);
+    // Общие контакты обзора подписываются только рядом с наведённым.
+    if (n.role === "person") return near || null;
+    return null;
+  }
+
+  // Подписи ставятся по важности: каждая следующая — только если не ложится
+  // на уже поставленные и на чужие узлы (сначала под узлом, потом над ним).
+  // Шрифт на экране не мельче base − 2 px: при отдалении подписей меньше,
+  // а не мельче.
+  drawLabels(ctx, vis) {
+    const T = this.tokens;
+    const k = this.view.k;
+    const radius = (n) => n.rBig || n.rSmall || (n.t === "deal" ? n.r : n.r * 1.35);
+    const cands = [];
+    const obstacles = [];
+    const hs = this.hoverSet;
     for (const n of this.nodes) {
       const al = vis(n);
       if (al <= 0.05) continue;
-      ctx.globalAlpha = Math.min(1, al * 1.2);
-      if (n.t === "deal") {
-        const R = n.rBig || n.rSmall || n.r;
-        // В фокусе подписаны только связанные с выбранным делом — иначе
-        // подписи дальних дел ложатся друг на друга.
-        const big = n.role === "center" || n.linked || (n.role !== "far" && (n.r >= 15 || v.k > 1.3));
-        if (!big) continue;
-        const text = cut(n.label, n.role === "center" ? 40 : 26);
-        ctx.font = (n.role === "center" ? "600 12px " : "11px ") + "system-ui";
-        if (n.role === "center") {
-          // Подложка: подпись выбранного дела читается поверх связей и фишек.
-          const tw = ctx.measureText(text).width;
-          ctx.save();
-          ctx.globalAlpha *= 0.88;
-          ctx.fillStyle = T["--g-bg"];
-          ctx.fillRect(n.x - tw / 2 - 6, n.y + R + 4, tw + 12, 20);
-          ctx.restore();
-        }
-        ctx.fillStyle = n.role === "center" ? T["--g-label"] : T["--g-label-2"];
-        ctx.fillText(text, n.x, n.y + R + 7);
-      } else if (n.role === "system") {
-        ctx.font = "10px system-ui";
-        ctx.fillStyle = T["--g-label-2"];
-        ctx.fillText(cut(n.label, 26), n.x, n.y + n.r + 7);
-      } else if (n.role === "el" || n.role === "child") {
-        ctx.font = (n.role === "el" ? "10px " : "9px ") + "system-ui";
-        ctx.fillStyle = T["--g-label-2"];
-        ctx.fillText(cut(n.label, n.role === "el" ? 28 : 22), n.x, n.y + n.r + 6);
-      }
+      // При наведении подписаны только подсвеченные — приглушённые им не мешают.
+      if (hs && !hs.has(n.id) && n.role !== "center") continue;
+      if (!(n.role === "far" && !n.linked)) obstacles.push(n);
+      const pr = this.labelPriority(n);
+      if (pr != null) cands.push({ n, al, pr });
     }
-    ctx.restore(); ctx.globalAlpha = 1;
+    cands.sort((a, b) => b.pr - a.pr);
+    const placed = [];
+    // Видимая часть мира: подпись не уходит за край кадра.
+    const vx0 = -this.view.x / k;
+    const vy0 = -this.view.y / k;
+    const vx1 = vx0 + this.canvas.clientWidth / k;
+    const vy1 = vy0 + this.canvas.clientHeight / k;
+    const inView = (r) => r.y >= vy0 && r.y + r.h <= vy1;
+    const free = (r, own) => inView(r) && placed.every((q) => r.x + r.w < q.x || q.x + q.w < r.x || r.y + r.h < q.y || q.y + q.h < r.y)
+      && obstacles.every((o) => {
+        if (o === own) return true;
+        const R = radius(o);
+        const cx = Math.max(r.x, Math.min(o.x, r.x + r.w));
+        const cy = Math.max(r.y, Math.min(o.y, r.y + r.h));
+        return (o.x - cx) ** 2 + (o.y - cy) ** 2 > R * R;
+      });
+
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    for (const { n, al, pr } of cands) {
+      const center = n.role === "center";
+      const size = center ? 12 : n.t === "deal" ? 11 : n.role === "child" ? 9 : 10;
+      const weight = center ? "600 " : "";
+      const maxW = center ? 280 : n.role === "child" ? 140 : 175;
+      const fit = this.fitText(ctx, n.label, `${weight}${size}px system-ui`, maxW);
+      const fs = Math.max(size, (size - 2) / k);
+      const sc = fs / size;
+      const pad = 4 * sc;
+      const w = fit.w * sc + pad * 2;
+      const h = fs * 1.45;
+      const R = radius(n);
+      const x = Math.max(vx0 + 2 / k, Math.min(vx1 - w - 2 / k, n.x - w / 2));
+      const below = { x, y: n.y + R + 3 * sc, w, h };
+      const above = { x, y: n.y - R - 3 * sc - h, w, h };
+      let r = free(below, n) ? below : free(above, n) ? above : null;
+      if (!r) {
+        if (pr < 1e8) continue;
+        r = below;
+      }
+      placed.push(r);
+      ctx.globalAlpha = Math.min(1, al * 1.2) * 0.8;
+      ctx.fillStyle = T["--g-bg"];
+      ctx.beginPath(); ctx.roundRect(r.x, r.y, r.w, r.h, 3 * sc); ctx.fill();
+      ctx.globalAlpha = Math.min(1, al * 1.2);
+      ctx.font = `${weight}${fs}px system-ui`;
+      ctx.fillStyle = center ? T["--g-label"] : T["--g-label-2"];
+      ctx.fillText(fit.text, r.x + w / 2, r.y + h / 2 + 0.5 * sc);
+    }
+  }
+
+  /** Текст, урезанный с многоточием до ширины (в пикселях шрифта font). */
+  fitText(ctx, s, font, maxW) {
+    const key = `${font}\n${maxW}\n${s}`;
+    const hit = this.textCache.get(key);
+    if (hit) return hit;
+    ctx.font = font;
+    let text = s;
+    if (ctx.measureText(s).width > maxW) {
+      let lo = 0;
+      let hi = s.length;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (ctx.measureText(`${s.slice(0, mid).trimEnd()}…`).width <= maxW) lo = mid; else hi = mid - 1;
+      }
+      text = `${s.slice(0, lo).trimEnd()}…`;
+    }
+    const out = { text, w: ctx.measureText(text).width };
+    if (this.textCache.size > 3000) this.textCache.clear();
+    this.textCache.set(key, out);
+    return out;
   }
 
   drawDeal(ctx, n, grow, now, red) {
@@ -710,6 +887,7 @@ export class CaseGraph {
             this.userMoved = true;
             this.view.x = drag.vx + dx; this.view.y = drag.vy + dy;
           }
+          this.invalidate();
         }
         return;
       }
@@ -718,7 +896,7 @@ export class CaseGraph {
       const id = n ? n.id : null;
       el.style.cursor = n ? "grab" : "default";
       if (id !== this.hoverId) {
-        this.hoverId = id;
+        this.setHover(id);
         const r = el.getBoundingClientRect();
         this.hooks.onTip?.(n ? { title: n.label, sub: this.tipSub(n),
           x: Math.min(r.width - 270, e.clientX - r.left + 14), y: e.clientY - r.top + 14 } : null);
@@ -732,9 +910,10 @@ export class CaseGraph {
       }
       this.dropId = null;
       drag = null;
+      this.invalidate();
     });
     el.addEventListener("pointerleave", () => {
-      drag = null; this.dropId = null; this.hoverId = null;
+      drag = null; this.dropId = null; this.setHover(null);
       el.style.cursor = "default";
       this.hooks.onTip?.(null);
     });
@@ -747,7 +926,7 @@ export class CaseGraph {
       this.cam = null;
       this.view.x = mx - (mx - this.view.x) * (k / this.view.k);
       this.view.y = my - (my - this.view.y) * (k / this.view.k);
-      this.view.k = k; this.userMoved = true; this.hooks.onZoom?.(k);
+      this.view.k = k; this.userMoved = true; this.invalidate(); this.hooks.onZoom?.(k);
     }, { passive: false });
     el.addEventListener("keydown", (e) => this.onKey(e));
   }
@@ -815,7 +994,7 @@ export class CaseGraph {
     const k = Math.max(0.3, Math.min(3.2, v.k * f));
     this.cam = null;
     v.x = w - (w - v.x) * (k / v.k); v.y = h - (h - v.y) * (k / v.k); v.k = k;
-    this.userMoved = true; this.hooks.onZoom?.(k);
+    this.userMoved = true; this.invalidate(); this.hooks.onZoom?.(k);
   }
 
   onKey(e) {
@@ -848,5 +1027,3 @@ export class CaseGraph {
     }
   }
 }
-
-function cut(s, n) { return s.length > n ? `${s.slice(0, n - 1)}…` : s; }
