@@ -168,10 +168,26 @@ export class CaseGraph {
     const { cases, cross, selected, allPeople, expanded } = this.data;
     const focus = selected ? this.byId.get(selected) : null;
 
-    cases.forEach((c, i) => {
-      const p = prev[c.id] || { x: Math.cos(i) * (180 + (i % 3) * 54), y: Math.sin(i) * (180 + (i % 3) * 54) };
+    // Раскладка обзора: не кольцо, а заполнение кадра по спирали от центра,
+    // и самые свежие дела — в середине. Так видно то, что происходит сейчас,
+    // а не то, что первым попало в список.
+    const order = [...cases].sort((a, b) => b.lastAt - a.lastAt).map((c) => c.id);
+    const seat = new Map(order.map((id, i) => [id, i]));
+    const aspect = this.canvas
+      ? Math.max(0.6, Math.min(2.2, (this.canvas.clientWidth || 1200) / (this.canvas.clientHeight || 700)))
+      : 1.6;
+    const GOLDEN = Math.PI * (3 - Math.sqrt(5));
+    const spiral = (i) => {
+      const r = 118 * Math.sqrt(i + 0.6);
+      const a = i * GOLDEN;
+      return { x: Math.cos(a) * r * aspect, y: Math.sin(a) * r };
+    };
+
+    cases.forEach((c) => {
+      const p = prev[c.id] || spiral(seat.get(c.id) ?? 0);
       nodes.push({ id: c.id, t: "deal", role: focus ? (c === focus ? "center" : "far") : "deal",
         r: dealR(c), x: p.x, y: p.y, deal: c, state: c.state, label: c.title, count: artifacts(c),
+        seat: seat.get(c.id) ?? 0,
         // Узел, поставленный рукой, остаётся там, куда его поставили.
         pinned: p.pinned, born: prev[c.id] ? (prev[c.id].born || 0) : bornNow, pulse: p.pulse || 0 });
     });
@@ -351,7 +367,15 @@ export class CaseGraph {
     }
     for (const n of ns) {
       if (n.pinned) continue;
-      n.x -= n.x * 0.004 * a; n.y -= n.y * 0.004 * a;
+      // Лёгкая тяга к своему месту в спирали: свежие дела держатся центра,
+      // остальные заполняют кадр и не сбиваются в ком.
+      if (n.t === "deal" && n.seat != null) {
+        const want = 118 * Math.sqrt(n.seat + 0.6);
+        const d = Math.hypot(n.x, n.y) || 0.01;
+        const f = (d - want) / d * 0.03 * a;
+        n.x -= n.x * f; n.y -= n.y * f;
+      }
+      n.x -= n.x * 0.002 * a; n.y -= n.y * 0.002 * a;
     }
   }
 

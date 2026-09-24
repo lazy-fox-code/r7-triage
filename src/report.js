@@ -38,6 +38,7 @@ export async function gateReport({
     // видно, какое правило снимет следующую тысячу, а какое ничего не даст.
     modelReasons: {},
     senders: profiled.counts,
+    aliasCandidates: profiled.counts?.aliasCandidates ?? 0,
     // Кандидаты в «свои адреса»: списки рассылки, на которые приходит почта.
     // Только на экран — в отчёт о проверке адреса не идут.
     topRecipients: profiled.topRecipients ?? [],
@@ -49,7 +50,7 @@ export async function gateReport({
 
   await db.pages("messages", batch, (rows) => {
     for (const row of rows) {
-      const f = derive(row, me, profiled.profiles);
+      const f = derive(row, me, { senders: profiled.profiles, threads: profiled.threads });
       const g = gate(f, cfg);
       out.total++;
       out[g.outcome]++;

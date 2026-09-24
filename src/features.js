@@ -9,18 +9,21 @@
 
 import { normalizeAddress } from "./keys.js";
 import { ENRICH } from "./db.js";
-import { actionHint, statusOf } from "./senders.js";
+import { actionHint, statusOf, meetingKind } from "./senders.js";
 
 export { normalizeAddress as normalize };
 
 /**
  * @param {object} row запись из хранилища `messages`
  * @param {Set<string>} me нормализованные адреса пользователя
- * @param {Map<string, object>|null} senders профили отправителей
- *   (`senders.js`). Их нет — правила по отправителю не работают, остальные
- *   работают как прежде.
+ * @param {Map|object|null} index разбор ящика из `senders.js`: карта
+ *   профилей отправителей либо `{ senders, threads }`, где threads — когда
+ *   вы последний раз писали в каждой ветке. Ничего не передали — правила по
+ *   отправителю и по ответу не работают, остальные работают как прежде.
  */
-export function derive(row, me, senders = null) {
+export function derive(row, me, index = null) {
+  const senders = index instanceof Map ? index : index?.senders ?? null;
+  const threads = index instanceof Map ? null : index?.threads ?? null;
   const to = row.to ?? [];
   const inTo = to.some((a) => me.has(a));
   const inCc = (row.cc ?? []).some((a) => me.has(a));
@@ -57,6 +60,17 @@ export function derive(row, me, senders = null) {
     // Кто пишет: профиль отправителя из его же писем. Считается отдельным
     // проходом и живёт в `people`; здесь только читается.
     sender: senders?.get(row.fromId) ?? null,
+
+    // Когда я последний раз писал в этой ветке. Письмо старше — на него уже
+    // ответили.
+    myReplyAt: threads
+      ? Math.max(threads.get(row.threadId) ?? 0, threads.get(row.thread?.root) ?? 0,
+        threads.get(row.id) ?? 0) || null
+      : null,
+
+    // Обработка встречи приходит обычным письмом: приставка в теме — всё,
+    // что от неё остаётся после шлюза Exchange.
+    meeting: meetingKind(row.subject),
   };
 }
 
@@ -95,7 +109,8 @@ export function modelSignature(f) {
     : "отправитель не разобран";
   const thread = f.isThreadStart == null ? "ветка неизвестна"
     : f.isThreadStart ? "начало ветки" : "ответ в ветке";
-  return `${addressing} · ${sender} · ${thread}`;
+  const mine = f.myReplyAt ? " · вы писали в ветке раньше" : "";
+  return `${addressing} · ${sender} · ${thread}${mine}`;
 }
 
 export function gate(f, cfg) {
@@ -135,6 +150,24 @@ export function gate(f, cfg) {
   if (f.calendarMethod === "CANCEL") {
     return decided("info", 0.95, "отмена встречи", ["calendar-cancel"], "METHOD:CANCEL");
   }
+  // То же, но без text/calendar: через шлюз Exchange от встречи остаётся
+  // только приставка в теме.
+  if (f.meeting === "response") {
+    return decided("noise", 0.9, "ответ на приглашение", ["meeting-subject"],
+      `Тема: ${f.subject}`);
+  }
+  if (f.meeting === "cancel" || f.meeting === "update") {
+    return decided("info", 0.85, f.meeting === "cancel" ? "отмена встречи" : "перенос встречи",
+      ["meeting-subject"], `Тема: ${f.subject}`);
+  }
+
+  // На это письмо вы уже ответили: в той же переписке есть ваше письмо
+  // позже. Что бы в нём ни просили, действие уже сделано — модели там
+  // делать нечего. Признак дешёвый и честный: он из ваших же писем.
+  if (f.myReplyAt && f.date < f.myReplyAt) {
+    return decided("info", 0.85, "вы уже ответили в этой переписке", ["answered"],
+      `Ваш ответ в ветке: ${new Date(f.myReplyAt).toLocaleDateString("ru-RU")}`);
+  }
 
   // Тема служебного письма, в котором нет содержания.
   const noise = statusOf(f.subject, cfg.noiseSubjects);
@@ -158,7 +191,10 @@ export function gate(f, cfg) {
   // решает, нужна ли модель, но не решает класс письма.
   const s = f.sender;
   if (s && (s.kind === "system" || s.kind === "broadcast")) {
-    const hint = actionHint(f.subject, cfg.actionWords);
+    // Признак действия в теме возвращает письмо модели — но только если
+    // система обратилась лично к вам. «Назначен» в рассылке на весь отдел
+    // означает, что назначили кого-то другого.
+    const hint = f.isNamedRecipient ? actionHint(f.subject, cfg.actionWords) : null;
     if (hint) {
       return { outcome: "model", reason: `от вас могут ждать действия: «${hint}» в теме` };
     }

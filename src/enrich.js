@@ -336,7 +336,7 @@ export class Enricher {
    * @param {boolean}     requeue вернуть в очередь письма, не прочитанные
    *                              раньше, если с тех пор прошло `retryAfterDays`
    */
-  async run({ since = null, requeue = false } = {}) {
+  async run({ since = null, requeue = false, order = null } = {}) {
     if (this.#running) return this.status();
     this.#running = true;
     this.#stopped = false;
@@ -361,7 +361,14 @@ export class Enricher {
       let streak = [];
 
       while (!this.#stopped) {
-        const batch = await this.db.enrichQueue({ since, until, limit: this.cfg.batchSize });
+        const batch = await this.db.enrichQueue({
+          since, until, limit: this.cfg.batchSize,
+          // Свежую почту читаем от новых к старым — она нужна сразу. Архив
+          // по умолчанию наоборот, по хронологии от первого письма: дело
+          // собирается с начала, а индекс ветки — сверху вниз.
+          // `since` задан — это свежий проход, даже если он с начала времён.
+          order: order ?? (since != null ? "newest" : this.cfg.archiveOrder ?? "oldest"),
+        });
         if (!batch.length) {
           state.done = true;
           state.finishedAt = Date.now();

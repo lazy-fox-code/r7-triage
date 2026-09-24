@@ -49,11 +49,18 @@ function sampleTable(title, rows) {
 function recipientsBlock(rows, mine) {
   if (!rows?.length) return "";
   const body = rows.map((x) => `<tr><td>${esc(x.email)}</td><td class="v">${num(x.letters)}</td>
+    <td>${x.neverWrites ? "только получает — похоже на список рассылки" : "пишет сам"}</td>
     <td><button data-alias="${esc(x.email)}">это мой адрес</button></td></tr>`).join("");
+  const candidates = rows.filter((x) => x.neverWrites).map((x) => x.email);
+  const all = candidates.length > 1
+    ? `<p><button data-alias-all="${esc(candidates.join(","))}">Добавить все адреса, которые только получают
+       (${candidates.length})</button></p>`
+    : "";
   return `<p>Кому адресована приходящая почта (${num(mine)} своих адресов в расчёте).
-    Если среди этих адресов есть списки рассылки, в которых вы состоите, добавьте их —
-    без них адресация считается неверно.</p>
-    <table><tr><th>Адрес</th><th>Писем</th><th></th></tr>${body}</table>`;
+    Адрес, который только получает письма и никогда не пишет, — это список рассылки или
+    общий ящик. Пока такие адреса не в «своих», письма на них считаются не адресованными
+    вам, и половина правил отсева работает неверно.</p>
+    <table><tr><th>Адрес</th><th>Писем</th><th></th><th></th></tr>${body}</table>${all}`;
 }
 
 function renderGate(r) {
@@ -94,13 +101,14 @@ function renderGate(r) {
 // Кнопка «это мой адрес» рядом с частым адресатом: дописывает его в свои
 // адреса. После этого замер отсева стоит посчитать заново.
 document.addEventListener("click", async (e) => {
-  const email = e.target?.dataset?.alias;
-  if (!email) return;
+  const one = e.target?.dataset?.alias;
+  const many = e.target?.dataset?.aliasAll;
+  if (!one && !many) return;
+  const add = one ? [one] : many.split(",").filter(Boolean);
   const cfg = await settings.load();
-  if (!cfg.me.aliases.includes(email)) {
-    await settings.save("me", { aliases: [...cfg.me.aliases, email] });
-  }
-  e.target.textContent = "добавлен — пересчитайте отсев";
+  const aliases = [...new Set([...cfg.me.aliases, ...add])];
+  await settings.save("me", { aliases });
+  e.target.textContent = "добавлено — пересчитайте отсев";
   e.target.disabled = true;
 });
 

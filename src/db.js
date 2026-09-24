@@ -245,20 +245,23 @@ function enrichRange(state, since = null, until = null) {
 }
 
 /**
- * Следующая пачка писем в заданном состоянии, от свежих к старым.
+ * Следующая пачка писем в заданном состоянии.
  *
  * @param {number|null} since мс; письма старше не берём (свежий проход)
  * @param {number|null} until мс; письма новее не берём (ещё не сохранены офлайн)
+ * @param {string} order "newest" — от свежих к старым (свежий проход),
+ *   "oldest" — от старых к свежим: так архив дочитывается по хронологии и
+ *   история дел собирается с начала, а не с середины.
  */
 export async function enrichQueue({
-  state = ENRICH.PENDING, since = null, until = null, limit = 500,
+  state = ENRICH.PENDING, since = null, until = null, limit = 500, order = "newest",
 } = {}) {
   const db = await open();
   return new Promise((resolve, reject) => {
     const t = db.transaction("messages", "readonly");
     const idx = t.objectStore("messages").index("enrichQueue");
     const out = [];
-    const req = idx.openCursor(enrichRange(state, since, until), "prev");
+    const req = idx.openCursor(enrichRange(state, since, until), order === "oldest" ? "next" : "prev");
     req.onsuccess = () => {
       const c = req.result;
       if (!c) return;

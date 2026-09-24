@@ -462,15 +462,33 @@ test("обогащение дочитывает все письма и пере�
   assert(rows.every((r) => r.hasAttachments === false), "вложений в генераторе нет");
 });
 
-test("обогащение идёт от свежих писем к старым", async () => {
+test("обогащение: свежая почта от новых писем, архив по хронологии с первого", async () => {
   const tb = generate(new FakeThunderbird(), { messages: 600, foldersPerAccount: 4, seed: 17 });
   await scanner(tb).run("full");
+  // Архив по умолчанию читается от старых писем к свежим: история дела
+  // собирается с начала, а не с середины.
   await enricher(tb, { batchSize: 50 }).run();
-
   const log = tb.fullLog;
   equal(log.length, 600, "прочитано писем");
-  assert(log.every((d, i) => i === 0 || d <= log[i - 1]),
-    "каждое следующее прочитанное письмо не новее предыдущего");
+  assert(log.every((d, i) => i === 0 || d >= log[i - 1]),
+    "архив читается по хронологии, от первого письма к последнему");
+
+  // Свежий проход — наоборот: свежая почта нужна сразу.
+  const tb2 = generate(new FakeThunderbird(), { messages: 300, foldersPerAccount: 3, seed: 21 });
+  await scanner(tb2).run("full");
+  await enricher(tb2, { batchSize: 50 }).run({ since: 0 });
+  const log2 = tb2.fullLog;
+  equal(log2.length, 300, "прочитано писем свежим проходом");
+  assert(log2.every((d, i) => i === 0 || d <= log2[i - 1]),
+    "свежий проход идёт от новых писем к старым");
+
+  // Порядок архива — настройка: прежнее поведение возвращается ею.
+  const tb3 = generate(new FakeThunderbird(), { messages: 200, foldersPerAccount: 2, seed: 23 });
+  await scanner(tb3).run("full");
+  await enricher(tb3, { batchSize: 50, archiveOrder: "newest" }).run();
+  const log3 = tb3.fullLog;
+  assert(log3.every((d, i) => i === 0 || d <= log3[i - 1]),
+    "archiveOrder: newest возвращает чтение от свежих писем");
 });
 
 test("свежий проход обогащения не трогает архив", async () => {
@@ -815,7 +833,7 @@ test("замер отсева: заголовки рассылок, профил
   const profiles = await db.getAll("people");
   const sd = profiles.find((p) => p.email === "sd@example.ru");
   equal(sd.kind, "system", "профиль отправителя сохранён в people");
-  assert(sd.why.includes("темы повторяются") && sd.why.includes("не писали"),
+  assert(sd.why.includes("одна и та же тема") && sd.why.includes("не писали"),
     "видно, почему это система");
 
   const withSample = await gateReport({ db, me: new Set(["me@example.ru"]), cfg: DEFAULTS.gate, sampleSize: 4 });
@@ -858,6 +876,50 @@ test("отсев по адресации: копия, письмо не мне �
   equal(statusOf("Инцидент INC001 решён", DEFAULTS.senders.statusWords), "решен", "статус из темы");
   equal(categoryOf("Инцидент INC001 решён", DEFAULTS.senders.statusWords), "инцидент",
     "категория — тема без номера и статуса");
+});
+
+test("отсев: обработка встреч по теме и письма, на которые вы уже ответили", async () => {
+  const me = new Set(["me@example.ru"]);
+  const cfg = DEFAULTS.gate;
+  const base = {
+    id: "m:x@example.ru", date: Date.now() - 3600000, fromId: "petrov@example.ru",
+    to: ["me@example.ru"], cc: [], enriched: 1, threadId: "t1", thread: { parent: null },
+  };
+
+  equal(gate(derive({ ...base, subject: "Принято: Планёрка в понедельник" }, me), cfg).outcome,
+    "noise", "ответ участника на приглашение — шум");
+  equal(gate(derive({ ...base, subject: "Новое время: Планёрка" }, me), cfg).outcome,
+    "info", "перенос встречи — информирование");
+  equal(gate(derive({ ...base, subject: "Отменено: Планёрка" }, me), cfg).reason,
+    "отмена встречи", "отмена встречи названа");
+  equal(gate(derive({ ...base, subject: "Планёрка в понедельник" }, me), cfg).outcome,
+    "model", "обычное письмо остаётся модели");
+
+  // Ваш ответ в ветке позже письма — действие уже сделано.
+  const threads = new Map([["t1", Date.now() - 600000]]);
+  const answered = gate(derive({ ...base, subject: "Смета на ремонт" }, me, { threads }), cfg);
+  equal(answered.outcome, "info", "письмо, на которое вы ответили, модели не нужно");
+  equal(answered.reason, "вы уже ответили в этой переписке", "причина названа");
+  const fresh = gate(derive({ ...base, subject: "Смета на ремонт", date: Date.now() }, me, { threads }), cfg);
+  equal(fresh.outcome, "model", "письмо после вашего ответа решает модель");
+});
+
+test("дела: приглашение, ответы участников и перенос — одна встреча", async () => {
+  const me = new Set(["me@example.ru"]);
+  const rows = [
+    letter("inv", { subject: "Планёрка по проекту", from: "petrov@example.ru",
+      to: ["me@example.ru", "sidorov@example.ru"], ageH: 50 }),
+    letter("a1", { subject: "Принято: Планёрка по проекту", from: "sidorov@example.ru", ageH: 40 }),
+    letter("a2", { subject: "Отклонено: Планёрка по проекту", from: "kuznecov@example.ru", ageH: 30 }),
+    letter("upd", { subject: "Новое время: Планёрка по проекту", from: "petrov@example.ru", ageH: 20 }),
+  ];
+  const { cases } = buildCases(rows, { me, cfg: DEFAULTS.cases });
+  equal(cases.length, 1, "встреча собрана в одно дело");
+  const c = cases[0];
+  equal(c.counts.mail, 4, "приглашение, два ответа и перенос вместе");
+  equal(c.counts.meet, 1, "встреча видна как сущность дела");
+  equal(c.meetings[0].responses, 2, "ответы участников посчитаны");
+  assert(c.letters.some((l) => l.why === "ответ участника на ту же встречу"), "почему письмо в деле");
 });
 
 test("профиль отправителя: ваши письма отменяют вердикт «система»", async () => {

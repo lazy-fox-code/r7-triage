@@ -647,24 +647,27 @@ function renderCollect() {
   const pass = st.running ? st.pass : null;
   const enriching = pass && pass.startsWith("enrich");
 
+  // Порядок в строке постоянный: состояние, полоса, кнопка. Имя папки и
+  // счётчики меняют длину, поэтому они внутри одного блока с обрезкой, а у
+  // кнопки своя ширина — иначе она уезжает из-под курсора.
   if (enriching) {
     const done = counts.done ?? 0;
     const total = done + (counts.pending ?? 0);
-    box.append(h("span", {}, h("strong", { text: "Дочитываю новые письма" }), " · ",
+    box.append(h("span", { class: "status" }, h("strong", { text: "Дочитываю новые письма" }), " · ",
       h("span", { class: "num", text: `${num(done)} из ${num(total)}` }),
       p.rate ? ` · ${p.rate} ${plural(p.rate, ["письмо", "письма", "писем"])}/с` : ""),
       h("span", { class: "bar" }, h("i", { style: `width: ${total ? Math.round(done / total * 100) : 0}%;` })),
-      h("button", { type: "button", class: "btn", onclick: pause }, icon("i-pause", 13), "Пауза"));
+      h("button", { type: "button", class: "btn act", onclick: pause }, icon("i-pause", 13), "Пауза"));
   } else if (pass) {
-    box.append(h("span", {}, h("strong", { text: "Разбираю ящик" }), p.folder ? ` · ${p.folder}` : ""),
-      h("button", { type: "button", class: "btn", onclick: pause }, icon("i-pause", 13), "Пауза"));
+    box.append(h("span", { class: "status" }, h("strong", { text: "Разбираю ящик" }), p.folder ? ` · ${p.folder}` : ""),
+      h("button", { type: "button", class: "btn act", onclick: pause }, icon("i-pause", 13), "Пауза"));
   } else {
     const at = e.savedAt ?? e.finishedAt;
-    box.append(h("span", { style: "display: flex; align-items: center; gap: 8px;" },
+    box.append(h("span", { class: "status", style: "display: flex; align-items: center; gap: 8px;" },
       h("span", { class: "dot", "data-s": e.error ? "err" : "ok" }),
       h("strong", { text: e.error ? "Сбор приостановлен" : "Всё актуально" }),
       at ? h("span", { class: "sep", text: "·" }) : null, at ? `обновлено в ${new Date(at).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}` : null),
-      h("button", { type: "button", class: "btn", "data-kind": "primary", onclick: refresh,
+      h("button", { type: "button", class: "btn act", "data-kind": "primary", onclick: refresh,
         title: "Дочитает все новые письма сейчас, в том числе моложе задержки — их клиент заберёт с сервера Exchange" },
       icon("i-refresh", 13), "Обновить"));
   }

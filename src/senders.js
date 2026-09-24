@@ -138,6 +138,26 @@ export function subjectTemplate(subject) {
     .trim();
 }
 
+// Обработка встреч в этой почте приходит обычными письмами: приглашений с
+// text/calendar через шлюз Exchange нет вовсе (на живом ящике 0 из 20 061),
+// а ответы участников и переносы узнаются только по приставке в теме.
+const MEETING_PREFIX = [
+  ["response", /^(?:принято|отклонено|предварительно|под\s*вопросом|accepted|declined|tentative)\s*:/i],
+  ["cancel", /^(?:отменено|отмена|canceled|cancelled)\s*:/i],
+  ["update", /^(?:новое\s*время|перенесено|обновлено|обновлённое\s*приглашение|обновленное\s*приглашение|updated(?:\s*invitation)?)\s*:/i],
+  ["invite", /^(?:приглашение|invitation)\s*:/i],
+];
+
+/**
+ * Письмо про встречу и какое именно: ответ участника, отмена, перенос,
+ * приглашение. null — обычное письмо.
+ */
+export function meetingKind(subject) {
+  const s = String(subject ?? "").trim();
+  for (const [kind, re] of MEETING_PREFIX) if (re.test(s)) return kind;
+  return null;
+}
+
 /** Есть ли в теме признак того, что от вас ждут действия. */
 export function actionHint(subject, words = []) {
   const s = normalizeSubject(subject);
@@ -165,6 +185,12 @@ export class SenderProfiler {
     // своих, — это списки рассылки, в которых состоит пользователь: без них
     // «мне в Кому» и «я в копии» считаются неверно.
     this.recipients = new Map();
+    // Кто вообще когда-либо писал: адрес, который только получает и никогда
+    // не пишет, — это список рассылки или общий ящик, а не человек.
+    this.senders = new Set();
+    // Когда я в последний раз писал в этой ветке. Письмо ветки старше этого
+    // момента уже отвечено — модели там делать нечего.
+    this.myLastInThread = new Map();
     // Мои письма вне папки «Отправленные» — признак того, что отправитель
     // писем определяется неверно (проверка доли «моих» писем).
     this.mine = { total: 0, outsideSent: 0 };
@@ -179,8 +205,14 @@ export class SenderProfiler {
       this.mine.total++;
       const sent = (row.locations ?? []).some((l) => /sent|отправ/i.test(l));
       if (!sent) this.mine.outsideSent++;
+      for (const key of [row.threadId, row.thread?.root, row.id]) {
+        if (!key) continue;
+        const prev = this.myLastInThread.get(key) ?? 0;
+        if (row.date > prev) this.myLastInThread.set(key, row.date);
+      }
       return;
     }
+    this.senders.add(row.fromId);
     for (const a of [...(row.to ?? []), ...(row.cc ?? [])]) {
       if (!a || this.me.has(a)) continue;
       if (this.recipients.size < 20000 || this.recipients.has(a)) {
@@ -238,7 +270,11 @@ export class SenderProfiler {
       // Доля переписок, чья тема повторяется у этого же отправителя: у
       // системы тема — бланк на каждое уведомление, у человека — разговор.
       let repeated = 0;
-      for (const threads of s.templates.values()) if (threads.size > 1) repeated += threads.size;
+      let topTemplate = 0;
+      for (const threads of s.templates.values()) {
+        if (threads.size > 1) repeated += threads.size;
+        if (threads.size > topTemplate) topTemplate = threads.size;
+      }
       const templateShare = s.threads.size ? repeated / s.threads.size : 0;
       // Ваши письма — половина картины: по ним видно, был разговор или
       // вещание. Доля веток отправителя, в которых писали вы, — та же
@@ -259,6 +295,9 @@ export class SenderProfiler {
         namedShare: s.letters ? s.namedToMe / s.letters : 0,
         attachShare: s.letters ? s.withAttachments / s.letters : 0,
         templateShare,
+        // В скольких разных переписках повторился самый частый бланк. У
+        // системы это десятки, у человека — две-три похожие темы за год.
+        topTemplateThreads: topTemplate,
         threads: s.threads.size,
         dialogThreads: dialog,
         dialogShare: s.threads.size ? dialog / s.threads.size : 0,
@@ -307,10 +346,12 @@ export function classifyKind(p, cfg = {}) {
   }
 
   const base = `писем ${p.letters}, вы этому адресу не писали и в его ветках не отвечали`;
-  if (p.templateShare >= share) {
+  const minThreads = cfg.templateMinThreads ?? 3;
+  if (p.templateShare >= share && (p.topTemplateThreads ?? 0) >= minThreads) {
     return {
       kind: "system",
-      why: `${base}, темы повторяются (${Math.round(p.templateShare * 100)} %)`,
+      why: `${base}, одна и та же тема в ${p.topTemplateThreads} переписках ` +
+        `(${Math.round(p.templateShare * 100)} % писем по шаблону)`,
       features: ["sender-one-way", "sender-templated"],
     };
   }
@@ -396,8 +437,15 @@ export async function profileSenders({ db, me, cfg, batch = 2000, onProgress = (
   // считается неверно.
   const topRecipients = [...profiler.recipients]
     .sort((a, b) => b[1] - a[1]).slice(0, 15)
-    .map(([email, letters]) => ({ email, letters }));
-  return { profiles, counts, topRecipients };
+    .map(([email, letters]) => ({
+      email, letters,
+      // Адрес, который только получает и никогда не пишет, — почти наверняка
+      // список рассылки или общий ящик, а не человек.
+      neverWrites: !profiler.senders.has(email),
+    }));
+  counts.aliasCandidates = topRecipients.filter(
+    (r) => r.neverWrites && r.letters >= (cfg.aliasHintLetters ?? 20)).length;
+  return { profiles, counts, topRecipients, threads: profiler.myLastInThread };
 }
 
 /** Профили из `people` — для путей, которые их не считают сами. */

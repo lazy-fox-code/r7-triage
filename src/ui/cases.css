@@ -400,6 +400,10 @@ body{overflow:hidden}
 .card[hidden],.list[hidden]{display:none}
 .empty{padding:var(--sp-5) var(--sp-4);color:var(--c-text-2);font-size:var(--fs-sm);text-align:center}
 .collect>*{white-space:nowrap;flex-shrink:0}
+/* Имя папки и прогресс — переменной длины: держим их в одном месте, чтобы
+   кнопка не уезжала под курсором. */
+.collect .status{flex:0 1 auto;min-width:0;max-width:46%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.collect .act{width:112px;justify-content:center;flex-shrink:0}
 .collect .note{color:var(--c-text-2);flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .collect .sep{color:var(--c-text-3)}
 .srcs{margin-left:auto;display:flex;gap:6px;align-items:center}

@@ -27,7 +27,8 @@ import { derive, gate } from "./features.js";
 import { normalizeSubject } from "./keys.js";
 import { DEFAULTS } from "./settings.js";
 import {
-  SenderProfiler, matchSystemAddress, objectId, objectKey, subjectTemplate, loadProfiles,
+  SenderProfiler, matchSystemAddress, meetingKind, objectId, objectKey, subjectTemplate,
+  loadProfiles,
 } from "./senders.js";
 
 // Правила «кто такой отправитель» общие с гейтом: система, которая в
@@ -243,6 +244,12 @@ function whyOf(row, ctx) {
   }
   if (row.thread?.root || row.thread?.parent) return "та же ветка";
   if (row.thread?.index) return "та же беседа Outlook";
+  const meet = ctx.meetKeys.get(row.id);
+  if (meet) {
+    return meet.kind === "response" ? "ответ участника на ту же встречу"
+      : meet.kind === "cancel" ? "отмена той же встречи"
+        : meet.kind === "update" ? "перенос той же встречи" : "приглашение на ту же встречу";
+  }
   const obj = ctx.objKeys.get(row.id);
   if (obj && ctx.sharedObjects.has(obj.key)) return `тот же предмет: ${obj.label}`;
   if (shared) {
@@ -279,12 +286,14 @@ export function buildCases(rows, {
     return `«${s?.name || email}»`;
   };
 
-  // Рассылки, автоматика и спам делами не становятся.
+  // Рассылки, автоматика и спам делами не становятся. Исключение — письма
+  // о встречах: «Принято:» и «Отклонено:» модели не нужны, но в деле это
+  // единственный след того, кто на встречу придёт.
   const kept = [];
   const sysKeys = new Map();
   for (const row of rows) {
     const g = gate(derive(row, me, sys), gateCfg);
-    if (g.outcome === "noise") continue;
+    if (g.outcome === "noise" && !meetingKind(row.subject)) continue;
     kept.push({ row, outcome: g.outcome });
     const key = systemKey(row, sys);
     if (key) sysKeys.set(row.id, key);
@@ -292,6 +301,11 @@ export function buildCases(rows, {
 
   const uf = new UnionFind();
   const objKeys = new Map();
+  // Письма о встречах: приглашений с text/calendar через шлюз Exchange нет,
+  // и встреча узнаётся только по приставке в теме — «Принято:», «Новое
+  // время:», «Отменено:». Тема без приставки у них общая, ею и собираем.
+  const meetKeys = new Map();
+  const bySubject = new Map();
   for (const { row } of kept) {
     uf.find(row.id);
     if (row.threadId) uf.union(row.id, row.threadId);
@@ -308,6 +322,22 @@ export function buildCases(rows, {
       const obj = objectKey(row.subject);
       if (obj) { objKeys.set(row.id, obj); uf.union(row.id, `obj:${obj.key}`); }
     }
+
+    const norm = normalizeSubject(row.subject);
+    if (norm) {
+      if (!bySubject.has(norm)) bySubject.set(norm, []);
+      bySubject.get(norm).push(row.id);
+    }
+    const kind = meetingKind(row.subject);
+    if (kind && norm) meetKeys.set(row.id, { key: `meet:${norm}`, kind, title: displaySubject(row.subject) });
+  }
+
+  // Приглашение, ответы участников и перенос — одна встреча, даже если
+  // писали её разные люди и общих адресатов у писем нет: у ответов участников
+  // общий только организатор, то есть вы.
+  const meetingSubjects = new Set([...meetKeys.values()].map((m) => m.key));
+  for (const key of meetingSubjects) {
+    for (const id of bySubject.get(key.slice(5)) ?? []) uf.union(id, key);
   }
 
   // Одинаковая тема при общем участнике — переписка, у которой не дошли
@@ -383,7 +413,7 @@ export function buildCases(rows, {
     const sharedObjects = new Set([...objCount].filter(([, n]) => n > 1).map(([k]) => k));
     const ctx = {
       startId: start.id, sharedUids, sharedSys, sharedObjects,
-      sysKeys, objKeys, subjectJoined, merged, systemName,
+      sysKeys, objKeys, meetKeys, subjectJoined, merged, systemName,
     };
 
     const meetings = new Map();
@@ -413,6 +443,20 @@ export function buildCases(rows, {
         p.letters++;
         if (addr === row.fromId) { p.wrote++; if (row.fromName) p.name = row.fromName; }
         people.set(addr, p);
+      }
+      // Встреча, собранная из темы: UID нет, но есть название, кто ответил
+      // и что с ней стало. Иначе через шлюз Exchange встреч не видно вовсе.
+      const mk = meetKeys.get(row.id);
+      if (mk) {
+        const prev = meetings.get(mk.key) ?? {
+          uid: mk.key, summary: mk.title, start: null, organizer: null,
+          attendees: 0, method: null, sequence: 0, cancelled: false,
+          fromSubject: true, responses: 0,
+        };
+        if (mk.kind === "response") prev.responses++;
+        if (mk.kind === "cancel") prev.cancelled = true;
+        if (mk.kind === "invite" || mk.kind === "update") prev.summary = mk.title;
+        meetings.set(mk.key, prev);
       }
       for (const c of row.calendar ?? []) {
         const map = c.kind === "task" ? tasks : meetings;
@@ -476,6 +520,7 @@ export function buildCases(rows, {
         thread: items.some(({ row }) => row.thread?.root || row.thread?.parent),
         outlook: items.some(({ row }) => row.thread?.index),
         meeting: sharedUids.size > 0,
+        meetingSubject: items.some(({ row }) => meetKeys.has(row.id)),
         object: sharedObjects.size > 0,
         subject: items.some(({ row }) => subjectJoined.has(row.id)),
         manual: items.some(({ row }) => merged.has(row.id)),

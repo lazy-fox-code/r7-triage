@@ -261,8 +261,10 @@ function headline(id, a) {
       const c = a.T3.check;
       if (!c) return a.T3.endpointSet ? "модель задана, проверка не запускалась" : "модель не подключена";
       if (!c.configured) return c.error;
+      const buildMs = Date.parse(`${a.T10?.buildDate ?? ""}T00:00:00Z`);
+      const stale = Number.isFinite(buildMs) && c.at < buildMs ? " (проверка устарела)" : "";
       return `JSON ${c.validJson}/${c.total}, верно ${c.correct}/${c.total}, ` +
-        `медиана ${duration(c.latencyMs?.median)}${c.reasoningDetected ? ", РАССУЖДАЮЩАЯ" : ""}`;
+        `медиана ${duration(c.latencyMs?.median)}${c.reasoningDetected ? ", РАССУЖДАЮЩАЯ" : ""}${stale}`;
     }
     case "T4": {
       const c = a.T4.cases;
@@ -339,6 +341,10 @@ function stageDetails(id, a) {
           out += "\n\nОсталось модели — чем письма попали в очередь:\n\n"
             + table(["Адресация · отправитель · ветка", "Писем"], left.map(([k, v]) => [k, num(v)]));
         }
+        if (g.aliasCandidates) {
+          out += `\n\nАдресов-кандидатов в свои (только получают письма, никогда не пишут): ${num(g.aliasCandidates)}.`
+            + " Список — на странице состояния, там же кнопка «это мой адрес».";
+        }
         if (g.senders?.mine != null) {
           out += "\n\n" + table(["Свои письма", "Сколько"], [
             ["Всего", num(g.senders.mine)],
@@ -356,8 +362,12 @@ function stageDetails(id, a) {
         ["Одновременных запросов", a.T3.concurrency],
       ];
       if (c?.configured) {
+        // Проверка, сделанная до этой сборки, ничего не говорит о ней: в
+        // отчёте это видно явно, иначе старые нули кочуют из отчёта в отчёт.
+        const buildMs = Date.parse(`${a.T10?.buildDate ?? ""}T00:00:00Z`);
+        const stale = Number.isFinite(buildMs) && c.at < buildMs;
         rows.push(
-          ["Проверка", when(c.at)],
+          ["Проверка", when(c.at) + (stale ? " — УСТАРЕЛА, сделана до этой сборки" : "")],
           ["Ответили / JSON / по схеме / верно", `${c.answered} / ${c.validJson} / ${c.schemaOk} / ${c.correct} из ${c.total}`],
           ["Рассуждающая модель", yes(c.reasoningDetected)],
           ["Поля ответа модели", (c.answerFields ?? []).join(", ") || "—"],
