@@ -14,11 +14,34 @@ const CASES_BOOL = ["joinByObject"];
 const GATE_BOOL = ["ccOnlyIsInfo", "unaddressedIsInfo"];
 const SENDERS_NUM = ["minLetters", "broadcastRecipients"];
 const DIR_NUM = ["cacheDays", "pauseMs", "maxPerSession"];
+const ARCHIVE_NUM = ["afterDays", "scanDays"];
+const ARCHIVE_BOOL = ["keepUnread", "keepFlagged", "keepAwaiting", "keepWithAttachments"];
 const DIR_BOOL = ["enabled", "includeRemote"];
 const MB = 1048576;
 
 const list = (s) => s.split(",").map((x) => x.trim()).filter(Boolean);
 const up = (k) => k[0].toUpperCase() + k.slice(1);
+
+/**
+ * Папки всех учётных записей для выбора архива. Дерево обходится целиком:
+ * в Thunderbird 115 у папки нет идентификатора, устойчивая пара — учётная
+ * запись и путь.
+ */
+async function fillFolders(selected) {
+  const box = $("archiveTarget");
+  const accounts = await browser.accounts.list(true);
+  const walk = (folders, account) => {
+    for (const f of folders ?? []) {
+      if (f.path && f.path !== "/") {
+        const value = `${f.accountId ?? account.id}|${f.path}`;
+        box.append(new Option(`${account.name}: ${f.path}`, value,
+          false, value === selected));
+      }
+      walk(f.subFolders ?? f.folders, account);
+    }
+  };
+  for (const account of accounts) walk(account.folders, account);
+}
 
 async function fill() {
   const cfg = await settings.load();
@@ -44,6 +67,9 @@ async function fill() {
   $("gateActionWords").value = cfg.gate.actionWords.join(", ");
   for (const k of DIR_NUM) $(`dir${up(k)}`).value = cfg.directory[k];
   for (const k of DIR_BOOL) $(`dir${up(k)}`).checked = cfg.directory[k];
+  for (const k of ARCHIVE_NUM) $(`archive${up(k)}`).value = cfg.archive[k];
+  for (const k of ARCHIVE_BOOL) $(`archive${up(k)}`).checked = cfg.archive[k];
+  await fillFolders(cfg.archive.target ? `${cfg.archive.target.accountId}|${cfg.archive.target.path}` : "");
   $("aliases").value = cfg.me.aliases.join(", ");
   $("tcHosts").value = cfg.trueconf.hosts.join(", ");
 }
@@ -120,6 +146,14 @@ $("save").addEventListener("click", async () => {
   for (const k of DIR_NUM) directory[k] = Number($(`dir${up(k)}`).value);
   for (const k of DIR_BOOL) directory[k] = $(`dir${up(k)}`).checked;
   await settings.save("directory", directory);
+  const target = $("archiveTarget").value;
+  const archive = {
+    target: target ? { accountId: target.slice(0, target.indexOf("|")), path: target.slice(target.indexOf("|") + 1) } : null,
+  };
+  for (const k of ARCHIVE_NUM) archive[k] = Number($(`archive${up(k)}`).value);
+  for (const k of ARCHIVE_BOOL) archive[k] = $(`archive${up(k)}`).checked;
+  await settings.save("archive", archive);
+
   await settings.save("me", { aliases: list($("aliases").value) });
   // Только имя сервера: схему и путь, если их вставили вместе с адресом, отрезаем.
   await settings.save("trueconf", {

@@ -28,6 +28,7 @@ import { myAddresses } from "./me.js";
 import { gateReport } from "./report.js";
 import { buildCases, loadCaseRows } from "./cases.js";
 import { findHeader } from "./locate.js";
+import { folderKey, parseFolderKey } from "./keys.js";
 import * as settings from "./settings.js";
 import * as trial from "./trial.js";
 
@@ -297,7 +298,8 @@ async function runGateReport() {
   const cfg = await settings.load();
   const me = await myAddresses(browser, cfg.me.aliases);
   // Выборка отсеянных — для проверки глазами на странице состояния.
-  const report = await gateReport({ db, me, cfg: cfg.gate, sendersCfg: cfg.senders, sampleSize: 20 });
+  const report = await gateReport({
+    db, me, cfg: cfg.gate, sendersCfg: settings.sendersCfg(cfg), sampleSize: 20 });
   report.myAddresses = me.size;
   await db.meta.set("gate:report", report);
   return report;
@@ -337,9 +339,10 @@ async function updateBadge() {
   const me = await myAddresses(browser, cfg.me.aliases);
   const since = Date.now() - cfg.cases.periodDays * DAY;
   const { rows, systems, merges } = await loadCaseRows(db,
-    { since, me, cfg: cfg.cases, sendersCfg: cfg.senders });
-  const { cases } = buildCases(rows,
-    { me, gateCfg: cfg.gate, cfg: cfg.cases, sendersCfg: cfg.senders, systems, merges, since });
+    { since, me, cfg: cfg.cases, sendersCfg: settings.sendersCfg(cfg) });
+  const { cases } = buildCases(rows, {
+    me, gateCfg: cfg.gate, cfg: cfg.cases, sendersCfg: settings.sendersCfg(cfg),
+    systems, merges, since });
   const fresh = cases.filter((c) => c.state === "new").length;
   try {
     await browser.spacesToolbar?.updateButton(CASES_BUTTON, {
@@ -364,6 +367,85 @@ async function openLetter(id) {
   return { ok: true };
 }
 
+// --- перенос в архив -----------------------------------------------------------
+//
+// Автоматики здесь нет: правило собирает кандидатов, человек смотрит список и
+// нажимает кнопку. Каждый перенос записывается распиской с прежним местом
+// письма, поэтому его можно отменить (правило 2 в CLAUDE.md: почту не
+// удаляем, максимум — переносим, и обратимо).
+
+const MAX_MOVE = 2000;
+
+async function archiveLetters(keys) {
+  const cfg = await settings.load();
+  const target = cfg.archive.target;
+  if (!target?.path) throw new Error("папка архива не выбрана: настройки → Архив");
+  if (!keys?.length) return { moved: 0 };
+  if (keys.length > MAX_MOVE) throw new Error(`за раз переносим не больше ${MAX_MOVE} писем`);
+
+  const moved = [];
+  const missing = [];
+  const byFolder = new Map();
+  for (const key of keys) {
+    const row = await db.get("messages", key);
+    if (!row) { missing.push(key); continue; }
+    const hdr = await findHeader(browser, row);
+    if (!hdr) { missing.push(key); continue; }
+    const from = row.locations?.[0] ?? null;
+    if (!byFolder.has(from)) byFolder.set(from, []);
+    byFolder.get(from).push(hdr.id);
+    moved.push({ key, from });
+  }
+
+  for (const ids of byFolder.values()) {
+    if (ids.length) await browser.messages.move(ids, target);
+  }
+
+  const receipt = {
+    at: Date.now(), target, letters: moved, missing: missing.length,
+    why: "нет писем по делу дольше срока из настроек",
+  };
+  const receipts = (await db.meta.get("archive:receipts")) ?? [];
+  receipts.unshift(receipt);
+  await db.meta.set("archive:receipts", receipts.slice(0, 200));
+
+  // Место хранения письма изменилось — записи это касается напрямую.
+  for (const m of moved) {
+    await db.patch("messages", m.key, (row) => ({
+      ...row, locations: [folderKey(target)], movedAt: receipt.at,
+    }));
+  }
+  return { moved: moved.length, missing: missing.length, at: receipt.at };
+}
+
+/** Отмена переноса по расписке: письма возвращаются туда, где лежали. */
+async function undoArchive(at) {
+  const receipts = (await db.meta.get("archive:receipts")) ?? [];
+  const receipt = receipts.find((r) => r.at === at);
+  if (!receipt) throw new Error("расписки нет");
+
+  const back = new Map();
+  for (const m of receipt.letters) {
+    if (!m.from) continue;
+    const row = await db.get("messages", m.key);
+    if (!row) continue;
+    const hdr = await findHeader(browser, row);
+    if (!hdr) continue;
+    if (!back.has(m.from)) back.set(m.from, []);
+    back.get(m.from).push({ id: hdr.id, key: m.key });
+  }
+  let moved = 0;
+  for (const [from, items] of back) {
+    await browser.messages.move(items.map((x) => x.id), parseFolderKey(from));
+    for (const x of items) {
+      await db.patch("messages", x.key, (row) => ({ ...row, locations: [from], movedAt: null }));
+    }
+    moved += items.length;
+  }
+  await db.meta.set("archive:receipts", receipts.filter((r) => r !== receipt));
+  return { moved };
+}
+
 /** Только черновик: окно ответа открывается, отправляет человек. */
 async function replyToLetter(id) {
   const hdr = await sessionHeader(id);
@@ -386,6 +468,9 @@ browser.runtime.onMessage.addListener((msg) => {
     case "gate.report": return runGateReport();
     case "cases.refresh": refreshNow(); return status();
     case "cases.badge":  return updateBadge();
+    case "cases.archive": return archiveLetters(msg.keys);
+    case "archive.undo":  return undoArchive(msg.at);
+    case "archive.receipts": return db.meta.get("archive:receipts");
     case "letter.open":  return openLetter(msg.id);
     case "letter.reply": return replyToLetter(msg.id);
     case "db.reset":    return db.reset().then(() => ({ ok: true }));

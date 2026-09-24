@@ -44,6 +44,9 @@ const S = {
   expandedSystems: new Set(),
   selectedSystem: null,
   sysLimit: 200,
+  // Кандидаты в архив живут за пределами показываемого периода, поэтому
+  // собираются отдельно и только по нажатию.
+  archive: { cases: [], at: 0, loading: false },
   byId: new Map(),
   selected: null,
   filter: "all",
@@ -108,13 +111,37 @@ const STATE_BG = (state) => `var(--st-${STATE_TOKEN[state] ?? "stale"}-bg)`;
 
 // --- данные -------------------------------------------------------------------
 
+/**
+ * Дела, по которым нет писем дольше срока из настроек, — кандидаты в архив.
+ * Считаются по более широкому окну, чем показываемый период: остывшее дело
+ * в обычный список и не попадает.
+ */
+async function loadArchive() {
+  S.archive.loading = true;
+  render();
+  const now = Date.now();
+  const since = now - S.cfg.archive.scanDays * DAY;
+  const { rows, systems: found, merges } = await loadCaseRows(db,
+    { since, me: S.me, cfg: S.cfg.cases, sendersCfg: settings.sendersCfg(S.cfg) });
+  const { cases } = buildCases(rows, {
+    me: S.me, gateCfg: S.cfg.gate, cfg: S.cfg.cases, sendersCfg: settings.sendersCfg(S.cfg),
+    archiveCfg: S.cfg.archive, systems: found, merges, since, now,
+  });
+  S.archive = {
+    loading: false, at: now,
+    cases: cases.filter((c) => c.archive?.candidate).sort((a, b) => a.lastAt - b.lastAt),
+  };
+  for (const c of S.archive.cases) S.byId.set(c.id, c);
+  render();
+}
+
 async function rebuild({ initial = false } = {}) {
   const since = Date.now() - S.cfg.cases.periodDays * DAY;
   S.since = since;
   const { rows, systems: found, merges, history } = await loadCaseRows(db,
-    { since, me: S.me, cfg: S.cfg.cases, sendersCfg: S.cfg.senders });
+    { since, me: S.me, cfg: S.cfg.cases, sendersCfg: settings.sendersCfg(S.cfg) });
   const { cases, cross, systems } = buildCases(rows, {
-    me: S.me, gateCfg: S.cfg.gate, cfg: S.cfg.cases, sendersCfg: S.cfg.senders,
+    me: S.me, gateCfg: S.cfg.gate, cfg: S.cfg.cases, sendersCfg: settings.sendersCfg(S.cfg),
     systems: found, merges, since,
   });
   const events = S.built ? diffCases(S.cases, cases) : [];
@@ -155,7 +182,9 @@ const bigCase = (c) => c.counts.mail >= 3 && c.counts.people >= 2;
 
 function visibleCases() {
   const q = S.query.trim().toLowerCase();
-  return S.cases.filter((c) => {
+  // «В архив» — отдельная выборка: эти дела старше показываемого периода.
+  const source = S.filter === "archive" ? S.archive.cases : S.cases;
+  return source.filter((c) => {
     const owner = c.systemOwner;
     if (owner && hiddenSystem(owner)) return false;
     // Дела свёрнутой системы в общем списке не показываются — они под её
@@ -163,6 +192,7 @@ function visibleCases() {
     if (owner && !q && !S.expandedSystems.has(owner)) return false;
     if (S.filter === "new" && c.state !== "new") return false;
     if (S.filter === "wait" && c.state !== "wait") return false;
+    if (S.filter === "meet" && !c.counts.meet) return false;
     if (S.filter === "big" && !bigCase(c)) return false;
     if (S.filter === "meet" && !c.counts.meet) return false;
     if (S.filter === "conf" && !c.counts.conf) return false;
@@ -224,16 +254,23 @@ function renderChips() {
     big: own.filter(bigCase).length,
     meet: own.filter((c) => c.counts.meet).length,
     conf: own.filter((c) => c.counts.conf).length,
+    archive: S.archive.cases.length,
   };
   const names = { all: "Все", new: "Новое", wait: "Жду ответа", big: "Крупные",
-    meet: "Со встречами", conf: "С конференциями" };
+    meet: "Со встречами", conf: "С конференциями", archive: "В архив" };
   const box = $("chips");
   box.textContent = "";
   for (const k of Object.keys(names)) {
     box.append(h("button", {
       type: "button", class: "chip", "aria-pressed": String(S.filter === k),
-      onclick: () => { S.filter = k; render(); },
-    }, names[k], h("span", { class: "num", text: num(counts[k]) })));
+      onclick: () => {
+        S.filter = k;
+        // Кандидатов в архив собираем по нажатию: это отдельный проход по
+        // более широкому окну, чем показываемый период.
+        if (k === "archive" && !S.archive.at && !S.archive.loading) loadArchive();
+        else render();
+      },
+    }, names[k], h("span", { class: "num", text: k === "archive" && !S.archive.at ? "?" : num(counts[k]) })));
   }
 }
 
@@ -312,9 +349,23 @@ function renderList(shown) {
     ["Просрочено", "over"], ["Готово", "done"],
     ["Переписка", "branch"], ["Информирование", "info"], ["Остыло", "old"],
   ];
+  if (S.filter === "archive") {
+    box.append(h("div", { class: "hidden-note" },
+      S.archive.loading
+        ? "Собираю дела, по которым давно нет писем…"
+        : `Дел без писем дольше ${S.cfg.archive.afterDays} ${plural(S.cfg.archive.afterDays, ["дня", "дней", "дней"])}: ${num(shown.length)}. ` +
+          "Непрочитанное, отмеченное флагом и то, где ждут вашего ответа, сюда не попадает.",
+      shown.length
+        ? h("button", { type: "button", class: "more", onclick: () => archiveCases(shown),
+          text: "Перенести показанные в архив" })
+        : null));
+  }
+
   const groups = S.filter === "big"
     ? [["Крупные дела", shown]]
-    : ORDER.map(([name, state]) => [name, shown.filter((c) => c.state === state)]);
+    : S.filter === "archive"
+      ? [["Кандидаты в архив", shown]]
+      : ORDER.map(([name, state]) => [name, shown.filter((c) => c.state === state)]);
   for (const [name, items] of groups) {
     if (!items.length) continue;
     box.append(h("div", { class: "grp" }, name, h("span", { class: "num", style: "color: var(--c-text-2);", text: num(items.length) })));
@@ -618,7 +669,12 @@ function renderCard() {
   card.append(h("div", { class: "actions" },
     h("button", { type: "button", class: "btn", "data-kind": "primary", title: "Откроется окно ответа — отправляете вы",
       onclick: () => replyLetter(lastIncoming.id) }, "Черновик ответа"),
-    h("button", { type: "button", class: "btn", onclick: () => openLetter(last.id) }, "Открыть в почте")));
+    h("button", { type: "button", class: "btn", onclick: () => openLetter(last.id) }, "Открыть в почте"),
+    c.archive?.candidate
+      ? h("button", { type: "button", class: "btn",
+        title: `Писем по делу нет ${c.archive.quietDays} дней. Перенос обратим: расписка на странице состояния`,
+        onclick: () => archiveCases([c]) }, "Перенести в архив")
+      : null));
 }
 
 function renderOverlay(total, shown) {
@@ -821,6 +877,31 @@ async function mergeManually(aId, bId) {
     why: "объединено вручную" });
   await rebuild();
   select(S.cases.find((c) => c.letters.some((l) => l.id === a.letters[0].id))?.id ?? null);
+}
+
+/**
+ * Перенос дел в архив. Никакой автоматики: список показан, человек нажал,
+ * расписка записана — вернуть можно на странице состояния.
+ */
+async function archiveCases(cases) {
+  if (!cases.length) return;
+  if (!S.cfg.archive.target?.path) {
+    pushEvent({ icon: "i-warn", kind: "err", what: "Папка архива не выбрана",
+      why: "настройки → Архив остывших дел" });
+    openSettings();
+    return;
+  }
+  const letters = cases.flatMap((c) => c.letters.map((l) => l.id));
+  const names = cases.length === 1 ? `«${cases[0].title}»` : `${cases.length} дел`;
+  if (!confirm(`Перенести ${names} в архив — ${num(letters.length)} ${plural(letters.length, ["письмо", "письма", "писем"])}?\n` +
+    "Письма не удаляются: они переедут в выбранную папку, перенос можно отменить.")) return;
+
+  const res = await send("cases.archive", { keys: letters });
+  if (!res) return;
+  pushEvent({ icon: "i-cases", what: `В архив перенесено ${num(res.moved)} ${plural(res.moved, ["письмо", "письма", "писем"])}`,
+    why: res.missing ? `не найдено писем: ${res.missing}` : "перенос обратим — страница состояния" });
+  S.archive = { cases: [], at: 0, loading: false };
+  await loadArchive();
 }
 
 const openLetter = (id) => send("letter.open", { id });

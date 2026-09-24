@@ -39,6 +39,9 @@ export async function gateReport({
     modelReasons: {},
     senders: profiled.counts,
     aliasCandidates: profiled.counts?.aliasCandidates ?? 0,
+    // Кто закрывает вопросы за вас — только на экран, в файл отчёта уходит
+    // одно число.
+    team: profiled.team ?? [],
     // Кандидаты в «свои адреса»: списки рассылки, на которые приходит почта.
     // Только на экран — в отчёт о проверке адреса не идут.
     topRecipients: profiled.topRecipients ?? [],
@@ -50,7 +53,9 @@ export async function gateReport({
 
   await db.pages("messages", batch, (rows) => {
     for (const row of rows) {
-      const f = derive(row, me, { senders: profiled.profiles, threads: profiled.threads });
+      const f = derive(row, me, {
+        senders: profiled.profiles, threads: profiled.threads, teamThreads: profiled.teamThreads,
+      });
       const g = gate(f, cfg);
       out.total++;
       out[g.outcome]++;

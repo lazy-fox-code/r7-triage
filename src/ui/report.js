@@ -221,13 +221,14 @@ async function refresh() {
   $("status").textContent = "Собираю метрики…";
   const cfg = await settings.load();
   const me = await myAddresses(browser, cfg.me.aliases);
-  const gate = await gateReport({ db, me, cfg: cfg.gate, sendersCfg: cfg.senders });
+  const gate = await gateReport({ db, me, cfg: cfg.gate, sendersCfg: settings.sendersCfg(cfg) });
   const session = await new TrueConfApi({ cfg: cfg.trueconf, store: db.meta }).session();
   const since = Date.now() - cfg.cases.periodDays * 86400000;
   const { rows, systems, merges, history } = await loadCaseRows(db,
-    { since, me, cfg: cfg.cases, sendersCfg: cfg.senders });
-  const built = buildCases(rows,
-    { me, gateCfg: cfg.gate, cfg: cfg.cases, sendersCfg: cfg.senders, systems, merges, since });
+    { since, me, cfg: cfg.cases, sendersCfg: settings.sendersCfg(cfg) });
+  const built = buildCases(rows, {
+    me, gateCfg: cfg.gate, cfg: cfg.cases, sendersCfg: settings.sendersCfg(cfg),
+    systems, merges, since });
   const auto = await collect({
     db, cfg, env: await environment(), gate, me, trueconfSession: session,
     cases: casesSummary(built.cases, built.cross,

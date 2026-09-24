@@ -268,6 +268,43 @@
       вы состоите, адресация считается неверно.</span>
   </label>
 
+  <h2>Архив остывших дел</h2>
+  <p class="hint">
+    Дело, по которому давно нет писем, можно перенести в другую папку —
+    например, в онлайн-архив. Автоматически ничего не переносится: вкладка
+    «Дела» → фильтр «В архив» показывает список, переносите вы кнопкой, и
+    каждый перенос обратим (расписка на странице состояния). Письма при этом
+    не удаляются.
+  </p>
+  <label>
+    <span>Куда переносить</span>
+    <select id="archiveTarget"><option value="">— не выбрано —</option></select>
+  </label>
+  <label>
+    <span>Нет писем по делу столько дней — кандидат в архив</span>
+    <input type="number" id="archiveAfterDays" min="1" max="3650">
+  </label>
+  <label>
+    <span>На сколько дней назад искать кандидатов</span>
+    <input type="number" id="archiveScanDays" min="30" max="7300">
+  </label>
+  <label>
+    <input type="checkbox" id="archiveKeepUnread">
+    Не переносить дела с непрочитанными письмами
+  </label>
+  <label>
+    <input type="checkbox" id="archiveKeepFlagged">
+    Не переносить дела с флагом
+  </label>
+  <label>
+    <input type="checkbox" id="archiveKeepAwaiting">
+    Не переносить дела, где ждут вашего ответа
+  </label>
+  <label>
+    <input type="checkbox" id="archiveKeepWithAttachments">
+    Не переносить дела с вложениями
+  </label>
+
   <h2>Свои адреса</h2>
   <label>
     <span>Дополнительные адреса</span>

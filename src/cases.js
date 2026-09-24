@@ -277,7 +277,8 @@ function whyOf(row, ctx) {
  */
 export function buildCases(rows, {
   me = new Set(), gateCfg = DEFAULTS.gate, cfg = DEFAULTS.cases,
-  sendersCfg = DEFAULTS.senders, systems = null, merges = [], since = null, now = Date.now(),
+  sendersCfg = DEFAULTS.senders, archiveCfg = DEFAULTS.archive,
+  systems = null, merges = [], since = null, now = Date.now(),
 } = {}) {
   const newDays = cfg.newDays ?? 7;
   const sys = systems ?? detectSystems(rows, me, sendersCfg);
@@ -479,7 +480,7 @@ export function buildCases(rows, {
       }
       return {
         id: row.id, date: row.date, fromId: row.fromId, fromName: row.fromName,
-        subject: row.subject, read: Boolean(row.read), mine,
+        subject: row.subject, read: Boolean(row.read), mine, flagged: Boolean(row.flagged),
         attachments: (row.attachments ?? []).filter((a) => !a.inline).length,
         why: whyOf(row, ctx),
       };
@@ -554,6 +555,25 @@ export function buildCases(rows, {
     // Уведомления системы — информирование, пока вы в них не вступили:
     // ответили — значит, это уже работа, а не лента.
     if (c.systemOwner && !myLetters && c.state !== "new") c.state = "info";
+    // Кандидат в архив: по делу нет писем дольше срока, непрочитанного нет,
+    // флага нет и никто не ждёт вашего ответа. Решение всё равно за
+    // человеком — правило только собирает список на просмотр.
+    const quietDays = Math.floor((now - c.lastAt) / DAY);
+    const keep = archiveCfg.keepUnread !== false && unread > 0
+      ? "есть непрочитанное"
+      : archiveCfg.keepFlagged !== false && letters.some((l) => l.flagged)
+        ? "стоит флаг"
+        : archiveCfg.keepAwaiting !== false && c.state === "wait"
+          ? "ждёте ответа"
+          : archiveCfg.keepWithAttachments && files.length
+            ? "есть вложения"
+            : null;
+    c.archive = {
+      quietDays,
+      candidate: quietDays >= (archiveCfg.afterDays ?? 30) && !keep,
+      keep,
+    };
+
     // Вес дела: по нему в списке поднимаются проекты и внедрения, а не
     // однописьменные уведомления. Письма, участники, вложения и срок жизни.
     c.weight = Math.round(

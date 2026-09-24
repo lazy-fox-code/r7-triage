@@ -184,7 +184,7 @@ export async function collect({ db, cfg, env, gate, me, trueconfSession, cases =
       lastError: enrichState?.error ?? null,
       // Выборка писем и адреса-кандидаты остаются на экране: в файле только
       // числа, флаги и названия полей.
-      gate: gate ? { ...gate, samples: undefined, topRecipients: undefined } : null,
+      gate: gate ? { ...gate, samples: undefined, topRecipients: undefined, team: undefined } : null,
       formats: await formatStats(db),
       myAddresses: me?.size ?? null,
       aliases: cfg.me.aliases.length,
@@ -336,6 +336,7 @@ function stageDetails(id, a) {
             ["Информационных систем", num(g.senders.system)],
             ["Вещание на многих", num(g.senders.broadcast)],
             ["Обычных отправителей", num(g.senders.person)],
+            ["Отвечают за вас (ваши сотрудники)", num(g.senders.team)],
           ]);
         }
         const reasons = Object.entries(g.reasons ?? {}).sort((x, y) => y[1] - x[1]);

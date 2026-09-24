@@ -63,6 +63,22 @@ function recipientsBlock(rows, mine) {
     <table><tr><th>Адрес</th><th>Писем</th><th></th><th></th></tr>${body}</table>${all}`;
 }
 
+/**
+ * Кто закрывает вопросы за вас: отвечал в ветках, где обращались к вам, а вы
+ * промолчали. Это сотрудники отдела и заместители — по адресу и по адресной
+ * книге их не видно, а по почте видно.
+ */
+function teamBlock(rows) {
+  if (!rows?.length) return "";
+  const body = rows.map((x) => `<tr><td>${esc(x.name || x.email)}</td><td>${esc(x.email)}</td>
+    <td class="v">${num(x.answers)}</td>
+    <td>${x.known ? "в вашей команде" : `<button data-team="${esc(x.email)}">это мой сотрудник</button>`}</td></tr>`).join("");
+  return `<p>Кто отвечает за вас. Столбец «ответов» — в скольких обращённых к вам
+    переписках человек ответил вместо вас. Отмеченные считаются вашими сотрудниками:
+    письмо, на которое такой человек ответил, для вас информирование.</p>
+    <table><tr><th>Кто</th><th>Адрес</th><th>Ответов</th><th></th></tr>${body}</table>`;
+}
+
 function renderGate(r) {
   if (!r) { $("gateOut").textContent = "Ещё не считали."; return; }
   const rows = [
@@ -92,6 +108,7 @@ function renderGate(r) {
     ${left ? `<p>Осталось модели — чем письма попали в очередь:</p><table>${left}</table>` : ""}
     ${senders}
     ${recipientsBlock(r.topRecipients, r.myAddresses)}
+    ${teamBlock(r.team)}
     ${sampleTable("Для проверки глазами: случайные письма, отсеянные как шум", r.samples?.noise)}
     ${sampleTable("…и как информирование", r.samples?.info)}
     <p>Посчитано ${when(r.at)}. Доля — от писем, по которым отсев мог решать:
@@ -103,14 +120,41 @@ function renderGate(r) {
 document.addEventListener("click", async (e) => {
   const one = e.target?.dataset?.alias;
   const many = e.target?.dataset?.aliasAll;
-  if (!one && !many) return;
-  const add = one ? [one] : many.split(",").filter(Boolean);
+  const mate = e.target?.dataset?.team;
+  const undo = e.target?.dataset?.undo;
+  if (undo) {
+    e.target.disabled = true;
+    e.target.textContent = "возвращаю…";
+    try {
+      const res = await browser.runtime.sendMessage({ cmd: "archive.undo", at: Number(undo) });
+      e.target.textContent = `возвращено писем: ${res?.moved ?? 0}`;
+      renderArchive(await db.meta.get("archive:receipts"));
+    } catch (err) {
+      e.target.textContent = `не вышло: ${String(err?.message ?? err)}`;
+    }
+    return;
+  }
+  if (!one && !many && !mate) return;
   const cfg = await settings.load();
-  const aliases = [...new Set([...cfg.me.aliases, ...add])];
-  await settings.save("me", { aliases });
+  if (mate) {
+    await settings.save("me", { team: [...new Set([...cfg.me.team, mate])] });
+  } else {
+    const add = one ? [one] : many.split(",").filter(Boolean);
+    await settings.save("me", { aliases: [...new Set([...cfg.me.aliases, ...add])] });
+  }
   e.target.textContent = "добавлено — пересчитайте отсев";
   e.target.disabled = true;
 });
+
+/** Расписки о переносе в архив: что, когда, куда — и кнопка «вернуть». */
+function renderArchive(receipts) {
+  const box = $("archive");
+  if (!receipts?.length) { box.textContent = "Ничего не переносили."; return; }
+  box.innerHTML = receipts.slice(0, 20).map((r) => `<p>
+    ${esc(when(r.at))} — ${num(r.letters?.length ?? 0)} писем в папку
+    ${esc(r.target?.path ?? "—")}${r.missing ? `, не найдено ${num(r.missing)}` : ""}.
+    <button data-undo="${r.at}">вернуть на место</button></p>`).join("");
+}
 
 async function refresh() {
   const counts = await db.stats();
@@ -120,6 +164,7 @@ async function refresh() {
 
   renderEnrich(await db.enrichCounts(), await db.meta.get("enrich"));
   renderGate(await db.meta.get("gate:report"));
+  renderArchive(await db.meta.get("archive:receipts"));
 
   const scans = await db.checkpoint.list();
   $("scans").innerHTML = scans.length

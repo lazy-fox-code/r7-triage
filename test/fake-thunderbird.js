@@ -40,6 +40,7 @@ export class FakeThunderbird {
     this.fullLog = [];          // даты прочитанных getFull писем, по порядку
     this.onFull = null;         // хук: обрыв посреди обогащения
     this.failFull = null;       // (m) => true — сервер не отдаёт письмо
+    this.moves = 0;             // сколько писем перенесено между папками
   }
 
   addAccount(id, name = id, identities = []) {
@@ -242,6 +243,19 @@ export class FakeThunderbird {
           tb.fullLog.push(m.date);
           tb.onFull?.(tb, m);
           return JSON.parse(JSON.stringify(tb.#full(m)));
+        },
+        /** Перенос писем в другую папку, как messages.move в 115. */
+        async move(ids, destination) {
+          const to = tb.#folder(destination);
+          if (!to) throw new Error("NotFoundError: папки назначения нет");
+          for (const id of ids) {
+            const m = tb.#byNumber(id);
+            if (!m || m.removed) throw new Error(`Message not found: ${id}`);
+            const from = tb.folders.find((f) => f.messages.includes(m));
+            if (from) from.messages = from.messages.filter((x) => x !== m);
+            to.messages.push(m);
+            tb.moves++;
+          }
         },
         async getAttachmentFile(id, partName) {
           const m = tb.#byNumber(id);

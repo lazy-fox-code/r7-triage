@@ -24,6 +24,7 @@ export { normalizeAddress as normalize };
 export function derive(row, me, index = null) {
   const senders = index instanceof Map ? index : index?.senders ?? null;
   const threads = index instanceof Map ? null : index?.threads ?? null;
+  const teamThreads = index instanceof Map ? null : index?.teamThreads ?? null;
   const to = row.to ?? [];
   const inTo = to.some((a) => me.has(a));
   const inCc = (row.cc ?? []).some((a) => me.has(a));
@@ -68,6 +69,13 @@ export function derive(row, me, index = null) {
         threads.get(row.id) ?? 0) || null
       : null,
 
+    // Когда в этой ветке за меня ответил сотрудник. Обращались ко мне, я
+    // промолчал, вопрос закрыл коллега — для меня это уже информирование.
+    teamReplyAt: teamThreads
+      ? Math.max(teamThreads.get(row.threadId) ?? 0, teamThreads.get(row.thread?.root) ?? 0,
+        teamThreads.get(row.id) ?? 0) || null
+      : null,
+
     // Обработка встречи приходит обычным письмом: приставка в теме — всё,
     // что от неё остаётся после шлюза Exchange.
     meeting: meetingKind(row.subject),
@@ -109,7 +117,8 @@ export function modelSignature(f) {
     : "отправитель не разобран";
   const thread = f.isThreadStart == null ? "ветка неизвестна"
     : f.isThreadStart ? "начало ветки" : "ответ в ветке";
-  const mine = f.myReplyAt ? " · вы писали в ветке раньше" : "";
+  const mine = f.myReplyAt ? " · вы писали в ветке раньше"
+    : f.teamReplyAt ? " · в ветке отвечал сотрудник" : "";
   return `${addressing} · ${sender} · ${thread}${mine}`;
 }
 
@@ -167,6 +176,13 @@ export function gate(f, cfg) {
   if (f.myReplyAt && f.date < f.myReplyAt) {
     return decided("info", 0.85, "вы уже ответили в этой переписке", ["answered"],
       `Ваш ответ в ветке: ${new Date(f.myReplyAt).toLocaleDateString("ru-RU")}`);
+  }
+  // За вас ответил сотрудник: обращались к вам, вы промолчали, вопрос закрыл
+  // коллега. Кто ваши сотрудники, видно по почте — в ветках, обращённых к
+  // вам, отвечают они (`senders.js`, team).
+  if (cfg.teamAnswerIsInfo !== false && f.teamReplyAt && f.date < f.teamReplyAt) {
+    return decided("info", 0.75, "за вас ответил сотрудник", ["team-answered"],
+      `Ответ коллеги в ветке: ${new Date(f.teamReplyAt).toLocaleDateString("ru-RU")}`);
   }
 
   // Тема служебного письма, в котором нет содержания.

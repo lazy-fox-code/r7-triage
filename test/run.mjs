@@ -914,6 +914,36 @@ test("отсев: обработка встреч по теме и письма,
   equal(fresh.outcome, "model", "письмо после вашего ответа решает модель");
 });
 
+test("архив: кандидаты по тишине, исключения и обратимость переноса", async () => {
+  const me = new Set(["me@example.ru"]);
+  const now = Date.now();
+  const build = (rows, over = {}) => buildCases(rows, {
+    me, cfg: DEFAULTS.cases, archiveCfg: { ...DEFAULTS.archive, ...over },
+    since: now - 365 * DAYS, now,
+  }).cases[0];
+
+  const quiet = build([letter("q1", { subject: "Прошлая закупка", ageH: 24 * 60 })]);
+  assert(quiet.archive.candidate, "нет писем два месяца — кандидат в архив");
+  equal(quiet.archive.quietDays, 60, "сколько дней тишины");
+
+  const recent = build([letter("r1", { subject: "Свежая закупка", ageH: 24 * 10 })]);
+  assert(!recent.archive.candidate, "дело с письмами за последний месяц не трогаем");
+
+  const unread = build([letter("u1", { subject: "Старое, но непрочитанное", ageH: 24 * 60, read: false })]);
+  equal(unread.archive.keep, "есть непрочитанное", "непрочитанное удерживает дело");
+
+  const flagged = build([letter("f1", { subject: "С флагом", ageH: 24 * 60, flagged: true })]);
+  equal(flagged.archive.keep, "стоит флаг", "флаг удерживает дело");
+
+  const waiting = build([letter("w1", { subject: "Мой вопрос без ответа", ageH: 24 * 60,
+    from: "me@example.ru", to: ["ivanov@example.ru"] })]);
+  equal(waiting.archive.keep, "ждёте ответа", "дело, где ждут вашего ответа, не переносим");
+
+  const withFiles = build([letter("a1", { subject: "Со вложением", ageH: 24 * 60,
+    attachments: [{ name: "акт.pdf", size: 10, inline: false }] })], { keepWithAttachments: true });
+  equal(withFiles.archive.keep, "есть вложения", "вложения удерживают дело, если так настроено");
+});
+
 test("дела: состояние видно по переписке — новое, жду ответа, в работе, остыло", async () => {
   const me = new Set(["me@example.ru"]);
   const now = Date.now();
@@ -1416,6 +1446,7 @@ function letter(id, extra = {}) {
     id: key, date: Date.now() - (extra.ageH ?? 1) * 3600000, subject: extra.subject ?? id,
     fromId: extra.from ?? "ivanov@example.ru", fromName: extra.fromName ?? "Иванов Иван",
     to: extra.to ?? ["me@example.ru"], cc: extra.cc ?? [], read: extra.read ?? true,
+    flagged: extra.flagged ?? false,
     enriched: 1, threadId: extra.threadId ?? key, thread: extra.thread ?? { root: null, parent: null, index: null },
     calendar: extra.calendar ?? [], conferences: extra.conferences ?? [], attachments: extra.attachments ?? [],
     bulk: extra.bulk ?? null, locations: ["account1|/INBOX"],

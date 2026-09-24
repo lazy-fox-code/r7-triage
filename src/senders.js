@@ -191,6 +191,10 @@ export class SenderProfiler {
     // Когда я в последний раз писал в этой ветке. Письмо ветки старше этого
     // момента уже отвечено — модели там делать нечего.
     this.myLastInThread = new Map();
+    // Ветки, в которых обращались ко мне: кто в них отвечал и отвечал ли я
+    // сам. Отсюда видно, кто закрывает вопросы за меня — заместители и
+    // сотрудники отдела. Каталог для этого не нужен: это видно по почте.
+    this.threadInfo = new Map();
     // Мои письма вне папки «Отправленные» — признак того, что отправитель
     // писем определяется неверно (проверка доли «моих» писем).
     this.mine = { total: 0, outsideSent: 0 };
@@ -198,7 +202,13 @@ export class SenderProfiler {
 
   add(row) {
     if (!row?.fromId) return;
+    const threadKey = row.threadId ?? row.thread?.root ?? row.id;
+    let t = this.threadInfo.get(threadKey);
+    if (!t) this.threadInfo.set(threadKey, t = { toMe: false, iWrote: false, repliers: new Map() });
+    if ([...(row.to ?? []), ...(row.cc ?? [])].some((a) => this.me.has(a))) t.toMe = true;
+
     if (this.me.has(row.fromId)) {
+      t.iWrote = true;
       for (const a of [...(row.to ?? []), ...(row.cc ?? []), ...(row.bcc ?? [])]) this.wroteTo.add(a);
       if (row.threadId) this.myThreads.add(row.threadId);
       if (row.thread?.root) this.myThreads.add(row.thread.root);
@@ -213,6 +223,12 @@ export class SenderProfiler {
       return;
     }
     this.senders.add(row.fromId);
+    // Ответ в ветке — это и есть «за меня ответили»: кто именно, покажет
+    // разбор веток, где обращались ко мне, а я промолчал.
+    if (row.thread?.parent) {
+      const prev = t.repliers.get(row.fromId) ?? 0;
+      if (row.date > prev) t.repliers.set(row.fromId, row.date);
+    }
     for (const a of [...(row.to ?? []), ...(row.cc ?? [])]) {
       if (!a || this.me.has(a)) continue;
       if (this.recipients.size < 20000 || this.recipients.has(a)) {
@@ -244,18 +260,18 @@ export class SenderProfiler {
     const thread = row.threadId ?? row.id;
     s.threads.add(thread);
 
-    const t = subjectTemplate(row.subject);
-    if (!t) return;
+    const template = subjectTemplate(row.subject);
+    if (!template) return;
     // Тема считается повторяющейся, если встретилась в разных переписках.
     // Иначе любая ветка из трёх писем с одной темой выглядела бы бланком:
     // «Договор» и два ответа «RE: Договор» — это разговор, а не шаблон.
-    let threads = s.templates.get(t);
-    if (!threads) {
+    let seenIn = s.templates.get(template);
+    if (!seenIn) {
       if (s.templates.size >= MAX_TEMPLATES) return;
-      threads = new Set();
-      s.templates.set(t, threads);
+      seenIn = new Set();
+      s.templates.set(template, seenIn);
     }
-    threads.add(thread);
+    seenIn.add(thread);
   }
 
   /**
@@ -264,8 +280,41 @@ export class SenderProfiler {
    * @param {object} cfg ветка `senders` настроек
    * @returns {Map<string, object>} адрес → профиль
    */
+  /**
+   * Кто отвечает за меня: в ветках, где обращались ко мне, а я не ответил,
+   * отвечал кто-то другой. Это сотрудники отдела и заместители — то самое,
+   * чего не видно ни по адресу, ни по адресной книге.
+   *
+   * @returns {{answers: Map<string, number>, lastInThread: Map<string, number>}}
+   */
+  team(cfg = {}) {
+    const answers = new Map();
+    for (const t of this.threadInfo.values()) {
+      if (!t.toMe || t.iWrote) continue;
+      for (const email of t.repliers.keys()) {
+        answers.set(email, (answers.get(email) ?? 0) + 1);
+      }
+    }
+    const min = cfg.teamMinAnswers ?? 2;
+    const manual = new Set((cfg.team ?? []).map((a) => String(a).trim().toLowerCase()));
+    const members = new Set([...manual]);
+    for (const [email, n] of answers) if (n >= min) members.add(email);
+
+    // Когда в ветке за меня ответили последний раз: письмо старше этого
+    // момента уже закрыто — коллега вопрос снял.
+    const lastInThread = new Map();
+    for (const [key, t] of this.threadInfo) {
+      if (!t.toMe || t.iWrote) continue;
+      let last = 0;
+      for (const [email, at] of t.repliers) if (members.has(email) && at > last) last = at;
+      if (last) lastInThread.set(key, last);
+    }
+    return { answers, members, lastInThread };
+  }
+
   profiles(cfg) {
     const out = new Map();
+    const team = this.team(cfg);
     for (const [email, s] of this.stat) {
       // Доля переписок, чья тема повторяется у этого же отправителя: у
       // системы тема — бланк на каждое уведомление, у человека — разговор.
@@ -302,6 +351,10 @@ export class SenderProfiler {
         dialogThreads: dialog,
         dialogShare: s.threads.size ? dialog / s.threads.size : 0,
         iWrote: this.wroteTo.has(email),
+        // В скольких обращённых ко мне ветках этот человек ответил вместо
+        // меня. Два и больше — это уже не случайность.
+        answersForMe: team.answers.get(email) ?? 0,
+        team: team.members.has(email),
         myThread,
         profiledAt: Date.now(),
       };
@@ -420,6 +473,7 @@ export async function profileSenders({ db, me, cfg, batch = 2000, onProgress = (
   });
 
   const profiles = profiler.profiles(cfg);
+  const team = profiler.team(cfg);
   const counts = {
     total: profiles.size, system: 0, broadcast: 0, person: 0, letters: seen,
     mine: profiler.mine.total, mineOutsideSent: profiler.mine.outsideSent,
@@ -445,7 +499,19 @@ export async function profileSenders({ db, me, cfg, batch = 2000, onProgress = (
     }));
   counts.aliasCandidates = topRecipients.filter(
     (r) => r.neverWrites && r.letters >= (cfg.aliasHintLetters ?? 20)).length;
-  return { profiles, counts, topRecipients, threads: profiler.myLastInThread };
+  counts.team = team.members.size;
+  // Кто отвечает за вас — на экран, с именами; в отчёт уходит только число.
+  const teamList = [...team.answers]
+    .filter(([, n]) => n >= (cfg.teamMinAnswers ?? 2))
+    .sort((a, b) => b[1] - a[1]).slice(0, 15)
+    .map(([email, answers]) => ({
+      email, answers, name: profiles.get(email)?.name ?? "",
+      known: (cfg.team ?? []).includes(email),
+    }));
+  return {
+    profiles, counts, topRecipients, team: teamList,
+    threads: profiler.myLastInThread, teamThreads: team.lastInThread,
+  };
 }
 
 /** Профили из `people` — для путей, которые их не считают сами. */
