@@ -838,7 +838,9 @@ async function showLevel(person, el) {
   try {
     const level = await dir.level(person.email);
     if (!level?.found) return;
-    const text = [level.title, level.department].filter(Boolean).join(" · ");
+    const text = [level.title, level.department,
+      level.managerName ? `руководитель: ${level.managerName}` : null]
+      .filter(Boolean).join(" · ");
     if (text) el.textContent = text;
   } catch { /* каталог недоступен — строки просто не будет */ }
 }

@@ -19,7 +19,9 @@ export const LEVEL_FIELDS = {
   title: ["TITLE", "JobTitle"],
   department: ["ORG", "Department"],
   role: ["ROLE"],
-  manager: ["X-MANAGER", "MANAGER", "Manager"],
+  // Руководителя в карточке Thunderbird своего места нет: администратор
+  // сопоставляет атрибут каталога с одним из полей Custom1-4 (docs/directory.md).
+  manager: ["X-MANAGER", "MANAGER", "Manager", "Custom1", "Custom2", "Custom3", "Custom4"],
 };
 
 /** Названия полей карточки: из vCard и из прочих свойств. Значения не берём. */

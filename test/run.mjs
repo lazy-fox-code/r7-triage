@@ -52,7 +52,7 @@ const { Semaphore } = await import(`${SRC}llm.js`);
 const { checkModel, SAMPLES } = await import(`${SRC}model-check.js`);
 const { checkDirectory } = await import(`${SRC}directory-check.js`);
 const { Tagger, TAGS, awaitingKeys } = await import(`${SRC}tagger.js`);
-const { DirectoryLookup, levelOf } = await import(`${SRC}directory.js`);
+const { DirectoryLookup, levelOf, nameFromDn } = await import(`${SRC}directory.js`);
 const report = await import(`${SRC}check-report.js`);
 const { buildCases, diffCases, displaySubject, loadCaseRows, objectId, subjectTemplate } = await import(`${SRC}cases.js`);
 const { SenderProfiler, actionHint, objectKey, statusOf, categoryOf } = await import(`${SRC}senders.js`);
@@ -1431,6 +1431,19 @@ test("каталог: локальные книги вперёд, GAL по од�
 
   equal(levelOf({ properties: { JobTitle: "Инженер", Department: "ИТ" } }).title, "Инженер",
     "поля карточки Thunderbird читаются наравне с vCard");
+
+  // Руководителя администратор кладёт в Custom1 сопоставлением атрибутов
+  // (docs/directory.md): значение — DN, из него берём имя.
+  const mapped = levelOf({ properties: {
+    JobTitle: "Инженер", Custom1: "CN=Петров Пётр,OU=Отдел,DC=corp,DC=example,DC=ru",
+    Custom2: "16", Custom3: "+7 495 000-00-00",
+  } });
+  equal(mapped.managerName, "Петров Пётр", "имя руководителя из DN");
+  equal(mapped.kind, "room", "вид адресата из msExchRecipientTypeDetails");
+  equal(levelOf({ properties: { Custom1: "+7 495 000-00-00" } }).manager, undefined,
+    "телефон в Custom1 за руководителя не принимаем");
+  equal(nameFromDn("CN=Иванов Иван Иванович,OU=Users,DC=corp"), "Иванов Иван Иванович",
+    "разбор DN");
 });
 
 test("отчёт о проверке: метрики по стадиям, ручные отметки, секретов нет", async () => {
